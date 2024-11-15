@@ -1,0 +1,186 @@
+<!-- scanner/templates/scanner/scan.html -->
+{% extends 'scanner/base.html' %}
+{% load static %}
+
+{% block content %}
+<div class="container-fluid">
+    <div class="row">
+        <!-- Video Feed Column -->
+        <div class="col-md-8">
+            <div class="card">
+                <div class="card-header d-flex justify-content-between align-items-center">
+                    <h5 class="mb-0">Scanning: {{ room.name }}</h5>
+                    <div>
+                        <span id="status" class="badge bg-secondary">Ready</span>
+                        <button id="startScan" class="btn btn-primary ms-2">Start Scan</button>
+                        <button id="stopScan" class="btn btn-danger ms-2" style="display: none;">Stop</button>
+                    </div>
+                </div>
+                <div class="card-body">
+                    <div class="video-container">
+                        <video id="video" autoplay playsinline class="w-100"></video>
+                        <canvas id="canvas" style="display: none;"></canvas>
+                    </div>
+                </div>
+            </div>
+        </div>
+
+        <!-- Results Column -->
+        <div class="col-md-4">
+            <div class="card">
+                <div class="card-header">
+                    <h5 class="mb-0">Detected Furniture</h5>
+                </div>
+                <div class="card-body">
+                    <div id="results" class="list-group"></div>
+                </div>
+            </div>
+        </div>
+    </div>
+</div>
+
+{% block extra_js %}
+<script>
+document.addEventListener('DOMContentLoaded', function() {
+    const video = document.getElementById('video');
+    const canvas = document.getElementById('canvas');
+    const ctx = canvas.getContext('2d');
+    const startButton = document.getElementById('startScan');
+    const stopButton = document.getElementById('stopScan');
+    const status = document.getElementById('status');
+    const results = document.getElementById('results');
+    let isScanning = false;
+    let scanInterval;
+
+    async function setupCamera() {
+        try {
+            const stream = await navigator.mediaDevices.getUserMedia({ 
+                video: { facingMode: 'environment' } 
+            });
+            video.srcObject = stream;
+            return true;
+        } catch (err) {
+            console.error('Error accessing camera:', err);
+            status.textContent = 'Camera Error';
+            status.className = 'badge bg-danger';
+            return false;
+        }
+    }
+
+    async function processScan() {
+        if (!isScanning) return;
+
+        canvas.width = video.videoWidth;
+        canvas.height = video.videoHeight;
+        ctx.drawImage(video, 0, 0);
+        
+        const imageData = canvas.toDataURL('image/jpeg');
+        
+        try {
+            console.log('Sending frame for processing...');
+            const response = await fetch('{% url "scanner:process_frame" %}', {
+                method: 'POST',
+                headers: {
+                    'Content-Type': 'application/json',
+                    'X-CSRFToken': '{{ csrf_token }}'
+                },
+                body: JSON.stringify({
+                    room_id: '{{ room.id }}',
+                    image: imageData
+                })
+            });
+
+            const data = await response.json();
+            console.log('Received response:', data);
+            
+            if (data.status === 'success') {
+                updateResults(data.detections);
+                if (data.image) {
+                    const img = new Image();
+                    img.src = data.image;
+                    img.onload = () => ctx.drawImage(img, 0, 0);
+                } 
+            } else {
+                console.error('Error processing scan:', data.message);
+                status.textContent = 'Error: ' + data.message;
+                status.className = 'badge bg-danger';
+            }
+        } catch (err) {
+            console.error('Error processing scan:', err);
+            status.textContent = 'Error: ' + err.message;
+            status.className = 'badge bg-danger';
+        }
+    }
+
+    function updateResults(detections) {
+        results.innerHTML = detections.map(detection => `
+            <div class="list-group-item">
+                <h6 class="mb-1">${detection.label}</h6>
+                <small>
+                    Dimensions: ${detection.dimensions.length}″ × 
+                    ${detection.dimensions.width}″ × 
+                    ${detection.dimensions.height}″
+                </small><br>
+                <small>Volume: ${detection.volume.toFixed(2)} cu ft</small><br>
+                <small>Confidence: ${(detection.confidence * 100).toFixed(1)}%</small>
+            </div>
+        `).join('');
+    }
+
+    startButton.addEventListener('click', async () => {
+        if (await setupCamera()) {
+            isScanning = true;
+            startButton.style.display = 'none';
+            stopButton.style.display = 'inline-block';
+            status.textContent = 'Scanning';
+            status.className = 'badge bg-success';
+            scanInterval = setInterval(processScan, 1000);
+        }
+    });
+
+    stopButton.addEventListener('click', () => {
+        isScanning = false;
+        clearInterval(scanInterval);
+        startButton.style.display = 'inline-block';
+        stopButton.style.display = 'none';
+        status.textContent = 'Ready';
+        status.className = 'badge bg-secondary';
+    });
+});
+</script>
+{% endblock %}
+
+<style>
+.video-container {
+    position: relative;
+    width: 100%;
+    height: 0;
+    padding-bottom: 75%;
+}
+
+.video-container video {
+    position: absolute;
+    top: 0;
+    left: 0;
+    width: 100%;
+    height: 100%;
+    object-fit: cover;
+}
+
+#canvas {
+    position: absolute;
+    top: 0;
+    left: 0;
+    width: 100%;
+    height: 100%;
+}
+
+.list-group-item {
+    transition: background-color 0.3s;
+}
+
+.list-group-item:hover {
+    background-color: #f8f9fa;
+}
+</style>
+{% endblock %}

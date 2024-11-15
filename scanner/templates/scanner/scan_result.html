@@ -1,0 +1,43 @@
+{% extends 'scanner/base.html' %}
+
+{% block content %}
+<div class="container">
+    <h2>Scan Results - {{ room.name }}</h2>
+    
+    {% for detection in detections %}
+    <div class="card mb-3">
+        <div class="card-body">
+            <h5 class="card-title">{{ detection.furniture_type }}</h5>
+            <div class="row">
+                <div class="col-md-4">
+                    <img src="{{ detection.image.url }}" class="img-fluid" alt="{{ detection.furniture_type }}">
+                </div>
+                <div class="col-md-8">
+                    <h6>Dimensions:</h6>
+                    <ul>
+                        <li>Length: {{ detection.dimensions.length }} inches</li>
+                        <li>Width: {{ detection.dimensions.width }} inches</li>
+                        <li>Height: {{ detection.dimensions.height }} inches</li>
+                        <li>Volume: {{ detection.volume }} cubic feet</li>
+                    </ul>
+                    
+                    <h6>Position in Room:</h6>
+                    <ul>
+                        <li>Distance from left wall: {{ detection.position.x|multiply:room.dimensions.length|floatformat:1 }} inches</li>
+                        <li>Distance from front wall: {{ detection.position.y|multiply:room.dimensions.width|floatformat:1 }} inches</li>
+                        <li>Distance from floor: {{ detection.position.z|multiply:room.dimensions.height|floatformat:1 }} inches</li>
+                    </ul>
+                    
+                    <h6>Additional Information:</h6>
+                    <ul>
+                        {% for info in detection.description %}
+                        <li>{{ info }}</li>
+                        {% endfor %}
+                    </ul>
+                </div>
+            </div>
+        </div>
+    </div>
+    {% endfor %}
+</div>
+{% endblock %}

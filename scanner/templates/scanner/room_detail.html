@@ -1,0 +1,77 @@
+<!-- scanner/templates/scanner/room_detail.html -->
+{% extends 'scanner/base.html' %}
+{% load static %}
+
+{% block content %}
+<div class="container">
+    <div class="row mb-4">
+        <div class="col-md-8">
+            <h1>{{ room.name }}</h1>
+            <p class="lead">{{ room.description }}</p>
+        </div>
+        <div class="col-md-4 text-end">
+            <a href="{% url 'scanner:scan_room' room.id %}" class="btn btn-primary me-2">
+                Start Scan
+            </a>
+            <a href="{% url 'scanner:edit_room' room.id %}" class="btn btn-secondary">
+                Edit Room
+            </a>
+        </div>
+    </div>
+
+    <div class="row mb-4">
+        <div class="col-md-4">
+            <div class="card">
+                <div class="card-body">
+                    <h5 class="card-title">Room Dimensions</h5>
+                    <ul class="list-unstyled">
+                        <li>Length: {{ room.dimensions.length }} inches</li>
+                        <li>Width: {{ room.dimensions.width }} inches</li>
+                        <li>Height: {{ room.dimensions.height }} inches</li>
+                        <li>Volume: {{ room.total_volume|floatformat:2 }} cu ft</li>
+                    </ul>
+                </div>
+            </div>
+        </div>
+        <div class="col-md-8">
+            <div class="card">
+                <div class="card-body">
+                    <h5 class="card-title">Recent Detections</h5>
+                    {% if detections %}
+                        <div class="table-responsive">
+                            <table class="table">
+                                <thead>
+                                    <tr>
+                                        <th>Type</th>
+                                        <th>Dimensions</th>
+                                        <th>Volume</th>
+                                        <th>Confidence</th>
+                                        <th>Time</th>
+                                    </tr>
+                                </thead>
+                                <tbody>
+                                    {% for detection in detections %}
+                                    <tr>
+                                        <td>{{ detection.furniture_type }}</td>
+                                        <td>
+                                            {{ detection.dimensions.length }}″ × 
+                                            {{ detection.dimensions.width }}″ × 
+                                            {{ detection.dimensions.height }}″
+                                        </td>
+                                        <td>{{ detection.volume|floatformat:2 }} cu ft</td>
+                                        <td>{{ detection.confidence|floatformat:2 }}</td>
+                                        <td>{{ detection.timestamp|date:"M d, Y H:i" }}</td>
+                                    </tr>
+                                    {% endfor %}
+                                </tbody>
+                            </table>
+                        </div>
+                    {% else %}
+                        <p class="text-muted">No furniture detections yet. Start a scan to detect furniture.</p>
+                    {% endif %}
+                </div>
+            </div>
+        </div>
+    </div>
+</div>
+{% endblock %}

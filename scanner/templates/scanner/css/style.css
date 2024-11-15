@@ -1,0 +1,26 @@
+/* scanner/static/scanner/css/style.css */
+.card {
+    height: 100%;
+    transition: transform 0.2s;
+}
+
+.card:hover {
+    transform: translateY(-5px);
+    box-shadow: 0 4px 8px rgba(0,0,0,0.1);
+}
+
+.nav-link {
+    padding: 0.5rem 1rem;
+}
+
+.alert {
+    margin-bottom: 1rem;
+}
+
+.modal-body {
+    padding: 1.5rem;
+}
+
+.form-label {
+    font-weight: 500;
+}

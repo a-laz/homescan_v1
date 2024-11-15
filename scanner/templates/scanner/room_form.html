@@ -1,0 +1,63 @@
+{% extends 'scanner/base.html' %}
+{% load django_bootstrap5 %}
+
+{% block content %}
+<div class="container mt-4">
+    <div class="row justify-content-center">
+        <div class="col-md-8">
+            <div class="card">
+                <div class="card-header">
+                    {% if is_edit %}
+                        Edit Room: {{ room.name }}
+                    {% else %}
+                        Add New Room
+                    {% endif %}
+                </div>
+                <div class="card-body">
+                    <form method="post">
+                        {% csrf_token %}
+                        {% bootstrap_form form %}
+                        <div class="form-text mb-3">
+                            Enter dimensions in the format: {"length": 120, "width": 144, "height": 96} (in inches)
+                        </div>
+                        <div class="d-grid gap-2">
+                            <button type="submit" class="btn btn-primary">
+                                {% if is_edit %}Update{% else %}Create{% endif %} Room
+                            </button>
+                            <a href="{% url 'scanner:home' %}" class="btn btn-secondary">Cancel</a>
+                        </div>
+                    </form>
+                </div>
+            </div>
+        </div>
+    </div>
+</div>
+
+{% block extra_js %}
+<script>
+document.addEventListener('DOMContentLoaded', function() {
+    // Add simple JSON validation
+    const form = document.querySelector('form');
+    const dimensionsInput = document.querySelector('#id_dimensions_str');
+
+    form.addEventListener('submit', function(e) {
+        try {
+            const dimensions = JSON.parse(dimensionsInput.value || '{}');
+            const required = ['length', 'width', 'height'];
+            const valid = required.every(key => {
+                return typeof dimensions[key] === 'number' && dimensions[key] >= 0;
+            });
+
+            if (!valid) {
+                e.preventDefault();
+                alert('Please enter valid dimensions with length, width, and height as positive numbers.');
+            }
+        } catch (error) {
+            e.preventDefault();
+            alert('Please enter valid JSON format for dimensions.');
+        }
+    });
+});
+</script>
+{% endblock %}
+{% endblock %}
