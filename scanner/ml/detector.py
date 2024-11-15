@@ -11,10 +11,91 @@ import logging
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
+class CameraCalibrator:
+    def __init__(self):
+        # ChArUco board parameters
+        self.CHARUCOBOARD_ROWCOUNT = 7
+        self.CHARUCOBOARD_COLCOUNT = 5
+        self.SQUARE_LENGTH = 0.04  # meters
+        self.MARKER_LENGTH = 0.02  # meters
+        
+        # Create Charuco board using latest API
+        self.aruco_dict = cv2.aruco.getPredefinedDictionary(cv2.aruco.DICT_4X4_100)
+        self.board = cv2.aruco.CharucoBoard(
+            (self.CHARUCOBOARD_COLCOUNT, self.CHARUCOBOARD_ROWCOUNT),
+            self.SQUARE_LENGTH,
+            self.MARKER_LENGTH,
+            self.aruco_dict
+        )
+        
+        # Create detector
+        self.detector = cv2.aruco.ArucoDetector(self.aruco_dict)
+
+    def calibrate_from_image(self, image):
+        """
+        Attempt to calibrate camera from a single image containing a ChArUco board.
+        Returns camera_matrix, dist_coeffs, and estimated_fov
+        """
+        if isinstance(image, np.ndarray):
+            gray = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY)
+        else:
+            gray = cv2.cvtColor(np.array(image), cv2.COLOR_RGB2GRAY)
+
+        # Detect ChArUco board
+        corners, ids, rejected = self.detector.detectMarkers(gray)
+
+        if len(corners) > 0:
+            # Get ChArUco corners
+            ret, charuco_corners, charuco_ids = cv2.aruco.interpolateCornersCharuco(
+                corners, ids, gray, self.board
+            )
+
+            if charuco_corners is not None and charuco_ids is not None and len(charuco_corners) > 3:
+                # Calibrate camera
+                ret, camera_matrix, dist_coeffs, rvecs, tvecs = cv2.aruco.calibrateCameraCharuco(
+                    [charuco_corners], [charuco_ids], self.board, gray.shape[::-1],
+                    None, None
+                )
+
+                # Calculate FOV
+                fov = 2 * np.arctan2(gray.shape[1]/2, camera_matrix[0,0])
+                fov_degrees = np.degrees(fov)
+
+                logger.info(f"Camera calibrated successfully. FOV: {fov_degrees:.2f} degrees")
+                return camera_matrix, dist_coeffs, fov_degrees
+
+        logger.warning("Could not calibrate camera from image. Using default parameters.")
+        # Return reasonable defaults
+        focal_length = gray.shape[1]  # Approximate focal length
+        center = (gray.shape[1]/2, gray.shape[0]/2)
+        camera_matrix = np.array([
+            [focal_length, 0, center[0]],
+            [0, focal_length, center[1]],
+            [0, 0, 1]
+        ], dtype=np.float32)
+        dist_coeffs = np.zeros((5,1))
+        fov_degrees = 60  # Default FOV
+
+        return camera_matrix, dist_coeffs, fov_degrees
+
+    def generate_calibration_board(self, size=(2000, 2000)):
+        """Generate a ChArUco board image for printing."""
+        board_img = self.board.generateImage(size)
+        return board_img
+
 class DimensionDetector:
     def __init__(self):
         self.reference_width = 8.5  # inches (standard letter paper width)
         self.reference_height = 11  # inches (standard letter paper height)
+        
+        # Initialize camera parameters
+        self.camera_matrix = None
+        self.dist_coeffs = None
+        self.fov = None
+        self.resolution = None
+        
+        # Create camera calibrator
+        self.calibrator = CameraCalibrator()
         
         # Define standard dimensions for different furniture types
         self.MAX_DIMENSIONS = {
@@ -27,7 +108,6 @@ class DimensionDetector:
             'default': {'width': 84, 'depth': 84, 'height': 84}
         }
         
-        # Define typical depth ratios for different furniture types
         self.DEPTH_RATIOS = {
             'chair': 0.9,
             'table': 1.2,
@@ -37,30 +117,14 @@ class DimensionDetector:
             'dresser': 0.5,
             'default': 0.8
         }
-        
-    def calculate_dimensions(self, image, bbox, furniture_type='default', depth_map=None):
-        """Calculate furniture dimensions using the bounding box."""
-        pixel_width = bbox[2] - bbox[0]
-        pixel_height = bbox[3] - bbox[1]
-        
-        # Log input parameters
-        logger.debug(f"Calculating dimensions for {furniture_type}: pixel_width={pixel_width}, pixel_height={pixel_height}")
-        
-        # First try to use reference object
-        reference_pixels = self.detect_reference_object(image)
-        
-        if reference_pixels and self._is_valid_reference(reference_pixels):
-            logger.info("Using reference object for measurements")
-            dimensions = self._calculate_with_reference(pixel_width, pixel_height, reference_pixels, furniture_type)
+
+    def calibrate_from_image(self, image):
+        """Calibrate camera using the provided image."""
+        self.camera_matrix, self.dist_coeffs, self.fov = self.calibrator.calibrate_from_image(image)
+        if isinstance(image, np.ndarray):
+            self.resolution = (image.shape[1], image.shape[0])
         else:
-            logger.info("Using ratio-based estimation")
-            dimensions = self.estimate_dimensions_from_ratios(pixel_width, pixel_height, furniture_type)
-        
-        # Apply furniture-specific constraints
-        dimensions = self._apply_constraints(dimensions, furniture_type)
-        
-        logger.info(f"Final dimensions: {dimensions}")
-        return dimensions
+            self.resolution = image.size
 
     def _is_valid_reference(self, reference_pixels):
         """Validate reference object measurements."""
@@ -73,22 +137,13 @@ class DimensionDetector:
                 min_size < reference_pixels['height'] < max_size and
                 0.7 < actual_ratio / expected_ratio < 1.3)
 
-    def _calculate_with_reference(self, pixel_width, pixel_height, reference_pixels, furniture_type):
-        """Calculate dimensions using reference object."""
-        pixels_per_inch = reference_pixels['width'] / self.reference_width
-        width = pixel_width / pixels_per_inch
-        height = pixel_height / pixels_per_inch
-        depth = width * self.DEPTH_RATIOS.get(furniture_type, self.DEPTH_RATIOS['default'])
-        
-        return {
-            'length': round(width, 1),
-            'width': round(depth, 1),
-            'height': round(height, 1)
-        }
-
     def detect_reference_object(self, image):
         """Detect a reference object (like a sheet of paper) in the image."""
-        gray = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY)
+        if isinstance(image, np.ndarray):
+            gray = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY)
+        else:
+            gray = cv2.cvtColor(np.array(image), cv2.COLOR_RGB2GRAY)
+            
         edges = cv2.Canny(gray, 50, 150)
         contours, _ = cv2.findContours(edges, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
         
@@ -111,17 +166,47 @@ class DimensionDetector:
         
         return best_match
 
-    def estimate_dimensions_from_ratios(self, pixel_width, pixel_height, furniture_type='default'):
-        """Estimate dimensions using typical furniture ratios."""
-        # Camera parameters
-        assumed_distance = 60  # inches (5 feet - reasonable default distance)
-        assumed_fov = 60  # degrees
-        image_width = 1920  # Update based on actual camera specs
-        image_height = 1080
+    def estimate_distance(self, image, bbox):
+        """Estimate distance to object using reference object method."""
+        if self.camera_matrix is None:
+            logger.warning("Camera not calibrated, using default distance")
+            return 60  # default distance in inches
+
+        # Try to find reference object
+        reference = self.detect_reference_object(image)
+        if reference and self._is_valid_reference(reference):
+            # Calculate distance using known reference object size
+            pixel_width = reference['width']
+            focal_length = self.camera_matrix[0, 0]
+            distance = (self.reference_width * focal_length) / pixel_width
+            return distance
         
-        # Calculate base dimensions
-        width = (pixel_width / image_width) * assumed_distance * np.tan(np.radians(assumed_fov/2)) * 2
-        height = (pixel_height / image_height) * assumed_distance * np.tan(np.radians(assumed_fov/2)) * 2
+        # Fallback to approximate distance based on object size
+        pixel_width = bbox[2] - bbox[0]
+        assumed_width = 30  # assume average furniture width of 30 inches
+        distance = (assumed_width * self.camera_matrix[0, 0]) / pixel_width
+        return distance
+
+    def _calculate_with_reference(self, pixel_width, pixel_height, reference_pixels, furniture_type):
+        """Calculate dimensions using reference object."""
+        pixels_per_inch = reference_pixels['width'] / self.reference_width
+        width = pixel_width / pixels_per_inch
+        height = pixel_height / pixels_per_inch
+        depth = width * self.DEPTH_RATIOS.get(furniture_type, self.DEPTH_RATIOS['default'])
+        
+        return {
+            'length': round(width, 1),
+            'width': round(depth, 1),
+            'height': round(height, 1)
+        }
+
+    def _calculate_with_camera_params(self, pixel_width, pixel_height, distance, furniture_type):
+        """Calculate dimensions using camera parameters and estimated distance."""
+        focal_length = self.camera_matrix[0, 0]
+        
+        # Calculate real-world dimensions
+        width = (pixel_width * distance) / focal_length
+        height = (pixel_height * distance) / focal_length
         depth = width * self.DEPTH_RATIOS.get(furniture_type, self.DEPTH_RATIOS['default'])
         
         return {
@@ -139,6 +224,41 @@ class DimensionDetector:
             'width': round(min(dimensions['width'], max_dims['depth']), 1),
             'height': round(min(dimensions['height'], max_dims['height']), 1)
         }
+
+    def calculate_dimensions(self, image, bbox, furniture_type='default', depth_map=None):
+        """Calculate furniture dimensions using the bounding box and camera parameters."""
+        # Ensure camera is calibrated
+        if self.camera_matrix is None:
+            self.calibrate_from_image(image)
+
+        pixel_width = bbox[2] - bbox[0]
+        pixel_height = bbox[3] - bbox[1]
+        
+        logger.debug(f"Calculating dimensions for {furniture_type}: pixel_width={pixel_width}, pixel_height={pixel_height}")
+        
+        # First try to use reference object
+        reference_pixels = self.detect_reference_object(image)
+        
+        if reference_pixels and self._is_valid_reference(reference_pixels):
+            logger.info("Using reference object for measurements")
+            dimensions = self._calculate_with_reference(pixel_width, pixel_height, reference_pixels, furniture_type)
+        else:
+            logger.info("Using camera parameters for estimation")
+            # Get distance to object
+            if depth_map is not None:
+                distance = np.mean(depth_map[bbox[1]:bbox[3], bbox[0]:bbox[2]])
+            else:
+                distance = self.estimate_distance(image, bbox)
+            
+            dimensions = self._calculate_with_camera_params(
+                pixel_width, pixel_height, distance, furniture_type
+            )
+        
+        # Apply furniture-specific constraints
+        dimensions = self._apply_constraints(dimensions, furniture_type)
+        
+        logger.info(f"Final dimensions: {dimensions}")
+        return dimensions
 
 class EnhancedFurnitureDetector:
     def __init__(self):
@@ -162,7 +282,6 @@ class EnhancedFurnitureDetector:
 
     def create_knowledge_base(self):
         """Create furniture knowledge base."""
-        
         self.knowledge_base = {
             "chair": [
                 "A chair is a piece of furniture with a raised surface supported by legs.",
@@ -222,8 +341,21 @@ class EnhancedFurnitureDetector:
         distances, indices = self.index.search(query_vector, k)
         return [self.text_items[idx] for idx in indices[0]]
 
-    def detect_and_measure(self, image):
+    def calibrate_camera(self, calibration_image):
+        """Calibrate camera using a calibration image."""
+        self.dimension_detector.calibrate_from_image(calibration_image)
+
+    def generate_calibration_board(self, size=(2000, 2000)):
+        """Generate a ChArUco board image for calibration."""
+        return self.dimension_detector.calibrator.generate_calibration_board(size)
+
+    def detect_and_measure(self, image, depth_map=None):
+        """Detect furniture and measure dimensions."""
         logger.info("Processing image for detection...")
+
+        # Ensure camera is calibrated
+        if self.dimension_detector.camera_matrix is None:
+            self.calibrate_camera(image)
 
         if isinstance(image, np.ndarray):
             image = Image.fromarray(cv2.cvtColor(image, cv2.COLOR_BGR2RGB))
@@ -240,21 +372,18 @@ class EnhancedFurnitureDetector:
         
         detections = []
         
-        # Process each detection
         for score, label, box in zip(results["scores"], results["labels"], results["boxes"]):
             box = [round(i, 2) for i in box.tolist()]
             label_name = self.model.config.id2label[label.item()].lower()
             
             if label_name in self.dimension_detector.MAX_DIMENSIONS:
-                # Get dimensions with furniture type
                 dimensions = self.dimension_detector.calculate_dimensions(
-                    np.array(image), box, furniture_type=label_name
+                    np.array(image), box, 
+                    furniture_type=label_name,
+                    depth_map=depth_map
                 )
                 
-                # Calculate volume (convert to cubic feet)
                 volume = (dimensions['length'] * dimensions['width'] * dimensions['height']) / 1728
-                
-                # Get relevant information
                 info = self.get_relevant_info(f"information about {label_name}")
                 
                 detections.append({
