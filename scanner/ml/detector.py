@@ -5,39 +5,96 @@ import faiss
 import numpy as np
 from sentence_transformers import SentenceTransformer
 import cv2
+import logging
+
+# Set up logging
+logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger(__name__)
 
 class DimensionDetector:
     def __init__(self):
         self.reference_width = 8.5  # inches (standard letter paper width)
         self.reference_height = 11  # inches (standard letter paper height)
         
-    def calculate_dimensions(self, image, bbox, depth_map=None):
+        # Define standard dimensions for different furniture types
+        self.MAX_DIMENSIONS = {
+            'chair': {'width': 30, 'depth': 30, 'height': 45},
+            'table': {'width': 72, 'depth': 42, 'height': 31},
+            'sofa': {'width': 84, 'depth': 40, 'height': 38},
+            'bookshelf': {'width': 48, 'depth': 24, 'height': 72},
+            'bed': {'width': 76, 'depth': 80, 'height': 45},
+            'dresser': {'width': 60, 'depth': 24, 'height': 36},
+            'default': {'width': 84, 'depth': 84, 'height': 84}
+        }
+        
+        # Define typical depth ratios for different furniture types
+        self.DEPTH_RATIOS = {
+            'chair': 0.9,
+            'table': 1.2,
+            'sofa': 0.8,
+            'bookshelf': 0.4,
+            'bed': 1.0,
+            'dresser': 0.5,
+            'default': 0.8
+        }
+        
+    def calculate_dimensions(self, image, bbox, furniture_type='default', depth_map=None):
         """Calculate furniture dimensions using the bounding box."""
         pixel_width = bbox[2] - bbox[0]
         pixel_height = bbox[3] - bbox[1]
         
-        # Detect reference object (if present)
+        # Log input parameters
+        logger.debug(f"Calculating dimensions for {furniture_type}: pixel_width={pixel_width}, pixel_height={pixel_height}")
+        
+        # First try to use reference object
         reference_pixels = self.detect_reference_object(image)
         
-        if reference_pixels:
-            pixels_per_inch = reference_pixels['width'] / self.reference_width
-            width = pixel_width / pixels_per_inch
-            height = pixel_height / pixels_per_inch
-            depth = self.estimate_depth_from_perspective(width, height)
-            
-            return {
-                'length': round(width, 1),
-                'width': round(depth, 1),
-                'height': round(height, 1)
-            }
+        if reference_pixels and self._is_valid_reference(reference_pixels):
+            logger.info("Using reference object for measurements")
+            dimensions = self._calculate_with_reference(pixel_width, pixel_height, reference_pixels, furniture_type)
         else:
-            return self.estimate_dimensions_from_ratios(pixel_width, pixel_height)
+            logger.info("Using ratio-based estimation")
+            dimensions = self.estimate_dimensions_from_ratios(pixel_width, pixel_height, furniture_type)
+        
+        # Apply furniture-specific constraints
+        dimensions = self._apply_constraints(dimensions, furniture_type)
+        
+        logger.info(f"Final dimensions: {dimensions}")
+        return dimensions
+
+    def _is_valid_reference(self, reference_pixels):
+        """Validate reference object measurements."""
+        min_size = 10  # minimum pixel size
+        max_size = 1000  # maximum pixel size
+        expected_ratio = self.reference_width / self.reference_height  # ~0.773 for letter paper
+        actual_ratio = reference_pixels['width'] / reference_pixels['height']
+        
+        return (min_size < reference_pixels['width'] < max_size and
+                min_size < reference_pixels['height'] < max_size and
+                0.7 < actual_ratio / expected_ratio < 1.3)
+
+    def _calculate_with_reference(self, pixel_width, pixel_height, reference_pixels, furniture_type):
+        """Calculate dimensions using reference object."""
+        pixels_per_inch = reference_pixels['width'] / self.reference_width
+        width = pixel_width / pixels_per_inch
+        height = pixel_height / pixels_per_inch
+        depth = width * self.DEPTH_RATIOS.get(furniture_type, self.DEPTH_RATIOS['default'])
+        
+        return {
+            'length': round(width, 1),
+            'width': round(depth, 1),
+            'height': round(height, 1)
+        }
 
     def detect_reference_object(self, image):
         """Detect a reference object (like a sheet of paper) in the image."""
         gray = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY)
         edges = cv2.Canny(gray, 50, 150)
         contours, _ = cv2.findContours(edges, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+        
+        best_match = None
+        best_score = float('inf')
+        target_ratio = self.reference_width / self.reference_height
         
         for contour in contours:
             peri = cv2.arcLength(contour, True)
@@ -46,29 +103,26 @@ class DimensionDetector:
             if len(approx) == 4:  # Rectangle
                 (x, y, w, h) = cv2.boundingRect(approx)
                 aspect_ratio = float(w) / h
+                ratio_diff = abs(aspect_ratio - target_ratio)
                 
-                if 0.7 <= aspect_ratio <= 0.9:  # US Letter aspect ratio ≈ 0.773
-                    return {'width': w, 'height': h}
-        return None
-
-    def estimate_depth_from_perspective(self, width, height):
-        """Estimate object depth using perspective analysis."""
-        typical_ratios = {
-            'chair': 0.8,
-            'table': 1.2,
-            'sofa': 0.9,
-            'bookshelf': 0.4
-        }
-        return width * 0.8  # Default ratio
-
-    def estimate_dimensions_from_ratios(self, pixel_width, pixel_height):
-        """Estimate dimensions using typical furniture ratios."""
-        assumed_distance = 120  # inches
-        assumed_fov = 60  # degrees
+                if ratio_diff < best_score and w > 20 and h > 20:  # Minimum size threshold
+                    best_score = ratio_diff
+                    best_match = {'width': w, 'height': h}
         
-        width = (pixel_width / 640) * assumed_distance * np.tan(np.radians(assumed_fov/2)) * 2
-        height = (pixel_height / 480) * assumed_distance * np.tan(np.radians(assumed_fov/2)) * 2
-        depth = width * 0.8
+        return best_match
+
+    def estimate_dimensions_from_ratios(self, pixel_width, pixel_height, furniture_type='default'):
+        """Estimate dimensions using typical furniture ratios."""
+        # Camera parameters
+        assumed_distance = 60  # inches (5 feet - reasonable default distance)
+        assumed_fov = 60  # degrees
+        image_width = 1920  # Update based on actual camera specs
+        image_height = 1080
+        
+        # Calculate base dimensions
+        width = (pixel_width / image_width) * assumed_distance * np.tan(np.radians(assumed_fov/2)) * 2
+        height = (pixel_height / image_height) * assumed_distance * np.tan(np.radians(assumed_fov/2)) * 2
+        depth = width * self.DEPTH_RATIOS.get(furniture_type, self.DEPTH_RATIOS['default'])
         
         return {
             'length': round(width, 1),
@@ -76,10 +130,19 @@ class DimensionDetector:
             'height': round(height, 1)
         }
 
+    def _apply_constraints(self, dimensions, furniture_type):
+        """Apply furniture-specific constraints to dimensions."""
+        max_dims = self.MAX_DIMENSIONS.get(furniture_type, self.MAX_DIMENSIONS['default'])
+        
+        return {
+            'length': round(min(dimensions['length'], max_dims['width']), 1),
+            'width': round(min(dimensions['width'], max_dims['depth']), 1),
+            'height': round(min(dimensions['height'], max_dims['height']), 1)
+        }
+
 class EnhancedFurnitureDetector:
     def __init__(self):
-         # Add debug print to confirm initialization
-        print("Initializing EnhancedFurnitureDetector...")
+        logger.info("Initializing EnhancedFurnitureDetector...")
 
         # Initialize DETR model for object detection
         self.processor = DetrImageProcessor.from_pretrained("facebook/detr-resnet-50")
@@ -160,10 +223,8 @@ class EnhancedFurnitureDetector:
         return [self.text_items[idx] for idx in indices[0]]
 
     def detect_and_measure(self, image):
-        # Add debug print
-        print("Processing image for detection...")
+        logger.info("Processing image for detection...")
 
-        """Detect furniture and measure dimensions."""
         if isinstance(image, np.ndarray):
             image = Image.fromarray(cv2.cvtColor(image, cv2.COLOR_BGR2RGB))
             
@@ -184,13 +245,13 @@ class EnhancedFurnitureDetector:
             box = [round(i, 2) for i in box.tolist()]
             label_name = self.model.config.id2label[label.item()].lower()
             
-            if label_name in self.knowledge_base:
-                # Get dimensions
+            if label_name in self.dimension_detector.MAX_DIMENSIONS:
+                # Get dimensions with furniture type
                 dimensions = self.dimension_detector.calculate_dimensions(
-                    np.array(image), box
+                    np.array(image), box, furniture_type=label_name
                 )
                 
-                # Calculate volume
+                # Calculate volume (convert to cubic feet)
                 volume = (dimensions['length'] * dimensions['width'] * dimensions['height']) / 1728
                 
                 # Get relevant information
