@@ -10,3 +10,4 @@ env/
 db.sqlite3
 *.sqlite3
 yolov5x.pt
+sam_vit_l_0b3195.pth

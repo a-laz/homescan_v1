@@ -12,6 +12,7 @@ import math
 import open3d as o3d
 import base64
 from io import BytesIO
+from segment_anything import sam_model_registry, SamPredictor
 
 # Set up logging
 logging.basicConfig(level=logging.INFO)
@@ -138,6 +139,12 @@ class EnhancedFurnitureDetector:
             'min_confidence': 0.5
         }
 
+        # Initialize SAM2
+        logger.info("Initializing SAM2...")
+        self.sam = sam_model_registry["vit_h"](checkpoint="sam_vit_h_4b8939.pth")
+        self.sam.to(self.device)
+        self.sam_predictor = SamPredictor(self.sam)
+
     def create_knowledge_base(self):
         """Create furniture knowledge base."""
         self.knowledge_base = {
@@ -241,25 +248,38 @@ class EnhancedFurnitureDetector:
         return normalized_depth
 
     def get_precise_boundaries(self, image, boxes):
-        """Get precise object boundaries using Mask R-CNN"""
-        if isinstance(image, np.ndarray):
-            image = torch.from_numpy(image).permute(2, 0, 1).float() / 255.0
-        
-        image = image.to(self.device)
-        
-        with torch.no_grad():
-            predictions = self.mask_rcnn([image])[0]
+        """Get precise object boundaries using Mask R-CNN and SAM2"""
+        # Initialize SAM with the image
+        if isinstance(image, torch.Tensor):
+            image = (image.cpu().numpy() * 255).astype(np.uint8).transpose(1, 2, 0)
+        self.sam_predictor.set_image(image)
         
         refined_boxes = []
-        for mask in predictions['masks']:
-            if mask.mean() > 0.5:
-                y_indices, x_indices = torch.where(mask[0] > 0.5)
+        masks = []
+        
+        # Process each bounding box
+        for box in boxes:
+            # Convert box to input format for SAM
+            input_box = np.array([
+                [box[0], box[1], box[2], box[3]]
+            ])
+            
+            # Get SAM prediction
+            sam_masks, _, _ = self.sam_predictor.predict(
+                box=input_box,
+                multimask_output=False
+            )
+            
+            if sam_masks.shape[0] > 0:
+                mask = sam_masks[0]
+                y_indices, x_indices = np.where(mask > 0.5)
                 if len(y_indices) > 0 and len(x_indices) > 0:
                     x_min, x_max = x_indices.min(), x_indices.max()
                     y_min, y_max = y_indices.min(), y_indices.max()
-                    refined_boxes.append([x_min.item(), y_min.item(), x_max.item(), y_max.item()])
+                    refined_boxes.append([x_min, y_min, x_max, y_max])
+                    masks.append(mask)
         
-        return refined_boxes
+        return refined_boxes, masks
 
     def _apply_constraints(self, dimensions, furniture_type):
         """Apply furniture-specific constraints to dimensions."""
@@ -280,14 +300,14 @@ class EnhancedFurnitureDetector:
         boxes, scores, labels = self.detect_objects(image)
         
         # Get precise boundaries
-        refined_boxes = self.get_precise_boundaries(image, boxes)
+        refined_boxes, masks = self.get_precise_boundaries(image, boxes)
         
         # Get depth map if not provided
         if depth_map is None:
             depth_map = self.estimate_depth(image)
         
         detections = []
-        for box, score, label in zip(refined_boxes, scores, labels):
+        for box, score, label, mask in zip(refined_boxes, scores, labels, masks):
             if label in self.MAX_DIMENSIONS:
                 # Get depth at object location
                 object_depth = depth_map[int(box[1]):int(box[3]), int(box[0]):int(box[2])].mean()

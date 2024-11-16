@@ -33,7 +33,19 @@
    pip install -r requirements.txt
    ```
 
-4. **Set Up Environment Variables**
+4. **Download SAM2 Checkpoint**
+   ```bash
+   # On macOS:
+   curl -O https://dl.fbaipublicfiles.com/segment_anything/sam_vit_l_0b3195.pth
+   
+   # On Linux:
+   wget https://dl.fbaipublicfiles.com/segment_anything/sam_vit_l_0b3195.pth
+   
+   # Or download directly in browser:
+   # https://dl.fbaipublicfiles.com/segment_anything/sam_vit_l_0b3195.pth
+   ```
+
+5. **Set Up Environment Variables**
    ```bash
    # Create .env file
    touch .env
@@ -44,17 +56,17 @@
    # Add any other required environment variables
    ```
 
-5. **Initialize Database**
+6. **Initialize Database**
    ```bash
    python manage.py migrate
    ```
 
-6. **Create Admin User** (Optional)
+7. **Create Admin User** (Optional)
    ```bash
    python manage.py createsuperuser
    ```
 
-7. **Run Development Server**
+8. **Run Development Server**
    ```bash
    python manage.py runserver
    ```
