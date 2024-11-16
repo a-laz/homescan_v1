@@ -6,3 +6,6 @@ __pycache__/
 .Python
 env/
 .env
+# Add these new lines
+db.sqlite3
+*.sqlite3
