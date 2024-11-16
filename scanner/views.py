@@ -12,9 +12,13 @@ import base64
 import cv2
 import numpy as np
 from datetime import datetime
+import logging
 
 # Initialize the detector
 detector = EnhancedFurnitureDetector()
+
+# Configure logging
+logger = logging.getLogger(__name__)
 
 def home(request):
     """Home page view showing all rooms."""
@@ -95,24 +99,33 @@ def process_frame(request):
             
             # Convert base64 to image
             try:
-                image_bytes = base64.b64decode(image_data.split(',')[1])
+                # Remove data URL prefix if present
+                if ',' in image_data:
+                    image_data = image_data.split(',')[1]
+                
+                # Decode base64 to bytes
+                image_bytes = base64.b64decode(image_data)
+                
+                # Convert to numpy array
                 nparr = np.frombuffer(image_bytes, np.uint8)
                 image = cv2.imdecode(nparr, cv2.IMREAD_COLOR)
 
                 if image is None:
                     raise ValueError("Failed to decode image")
                 
-                print(f"Image shape: {image.shape}")
+                logger.info(f"Image shape before detection: {image.shape}")
+                logger.info(f"Image dtype before detection: {image.dtype}")
+                
             except Exception as e:
                 return JsonResponse({
                     'status': 'error',
                     'message': f"Error processing image: {str(e)}"
                 })
             
-            # Get detections with dimensions
+            # Get detections with dimensions using the detector
             try:
                 detections = detector.detect_and_measure(image)
-                print(f"Detections found: {len(detections)}")
+                logger.info(f"Detections found: {len(detections)}")
 
                 if not detections:
                     return JsonResponse({
@@ -128,10 +141,10 @@ def process_frame(request):
             
             # Draw boxes and labels
             for detection in detections:
-                box = detection["box"]
+                box = detection["bounding_box"]  # Updated to match new detector output
                 dimensions = detection["dimensions"]
                 volume = detection["volume"]
-                label = f"{detection['label']} ({volume} cu ft)"
+                label = f"{detection['type']} ({volume} cu ft)"  # Updated to match new detector output
                 
                 # Draw bounding box
                 cv2.rectangle(
@@ -165,10 +178,10 @@ def process_frame(request):
             for detection in detections:
                 FurnitureDetection.objects.create(
                     room=room,
-                    furniture_type=detection['label'],
+                    furniture_type=detection['type'],  # Updated to match new detector output
                     confidence=detection['confidence'],
                     dimensions=detection['dimensions'],
-                    volume=detection['volume'],
+                    volume=float(detection['volume']),  # Convert string to float
                     image=f'data:image/jpeg;base64,{img_base64}',
                 )
             
