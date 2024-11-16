@@ -87,6 +87,7 @@ def process_frame(request):
             data = json.loads(request.body)
             room_id = data.get('room_id')
             image_data = data.get('image')
+            lidar_data = data.get('lidar')
             
             if not room_id or not image_data:
                 return JsonResponse({
@@ -122,21 +123,28 @@ def process_frame(request):
                     'message': f"Error processing image: {str(e)}"
                 })
             
-            # Get detections with dimensions using the detector
-            try:
+            # Process LiDAR data if available
+            if lidar_data:
+                lidar_points = np.array(lidar_data['points'])
+                camera_matrix = np.array(data.get('camera_matrix'))
+                extrinsics = np.array(data.get('extrinsics'))
+                
+                detections = detector.detect_and_measure(
+                    image,
+                    lidar_data=lidar_points,
+                    camera_matrix=camera_matrix,
+                    extrinsics=extrinsics
+                )
+            else:
                 detections = detector.detect_and_measure(image)
-                logger.info(f"Detections found: {len(detections)}")
+                
+            logger.info(f"Detections found: {len(detections)}")
 
-                if not detections:
-                    return JsonResponse({
-                        'status': 'success',
-                        'detections': [],
-                        'message': 'No furniture detected in frame'
-                    })
-            except Exception as e:
+            if not detections:
                 return JsonResponse({
-                    'status': 'error',
-                    'message': f"Error detecting and measuring furniture: {str(e)}"
+                    'status': 'success',
+                    'detections': [],
+                    'message': 'No furniture detected in frame'
                 })
             
             # Draw boxes and labels

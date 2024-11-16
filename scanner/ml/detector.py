@@ -9,11 +9,13 @@ import torchvision
 from sentence_transformers import SentenceTransformer
 import torch.nn.functional as F
 import math
+import open3d as o3d
+import base64
+from io import BytesIO
 
 # Set up logging
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
-
 class CameraCalibrator:
     def __init__(self):
         # ChArUco board parameters
@@ -127,6 +129,13 @@ class EnhancedFurnitureDetector:
             'bed': 1.0,
             'dresser': 0.5,
             'default': 0.8
+        }
+
+        # Add LiDAR configuration
+        self.lidar_config = {
+            'min_depth': 0.1,  # meters
+            'max_depth': 10.0,  # meters
+            'min_confidence': 0.5
         }
 
     def create_knowledge_base(self):
@@ -319,140 +328,141 @@ class EnhancedFurnitureDetector:
         
         return detections
 
-    def detect_and_measure(self, image):
+    def process_lidar_data(self, lidar_points):
+        """Process raw LiDAR point cloud data"""
+        # Convert to Open3D point cloud
+        pcd = o3d.geometry.PointCloud()
+        pcd.points = o3d.utility.Vector3dVector(lidar_points[:, :3])
+        
+        # Remove statistical outliers
+        pcd, _ = pcd.remove_statistical_outliers(nb_neighbors=20, std_ratio=2.0)
+        
+        # Segment ground plane
+        plane_model, inliers = pcd.segment_plane(distance_threshold=0.03,
+                                               ransac_n=3,
+                                               num_iterations=1000)
+        
+        # Extract non-ground points
+        object_cloud = pcd.select_by_index(inliers, invert=True)
+        
+        return object_cloud
+
+    def fuse_camera_lidar(self, image, lidar_points, camera_matrix, extrinsics):
+        """Fuse camera and LiDAR data for accurate measurements"""
+        # Project LiDAR points onto image
+        points_3d = lidar_points[:, :3]
+        points_2d = cv2.projectPoints(
+            points_3d,
+            extrinsics[:3, :3],
+            extrinsics[:3, 3],
+            camera_matrix,
+            None
+        )[0].reshape(-1, 2)
+        
+        return points_2d, points_3d
+
+    def detect_and_measure(self, image, lidar_data=None, camera_matrix=None, extrinsics=None):
         """
-        Main method to detect and measure furniture in an image.
-        Returns a list of dictionaries containing detection and measurement information.
+        Enhanced detection and measurement using both camera and LiDAR data
+        Args:
+            image: RGB image
+            lidar_data: LiDAR point cloud data (optional)
+            camera_matrix: Camera intrinsic parameters
+            extrinsics: Camera-LiDAR extrinsic calibration matrix
         """
         try:
-            # Convert image to numpy array if needed
-            if isinstance(image, Image.Image):
-                image = np.array(image)
-            elif isinstance(image, str):
-                image = cv2.imread(image)
-            elif isinstance(image, bytes):
-                nparr = np.frombuffer(image, np.uint8)
-                image = cv2.imdecode(nparr, cv2.IMREAD_COLOR)
+            # Convert base64 to image if needed
+            if isinstance(image, str) and image.startswith('data:image'):
+                image = Image.open(BytesIO(base64.b64decode(image.split(',')[1])))
+            elif isinstance(image, np.ndarray):
+                image = Image.fromarray(image)
             
-            # Ensure we have a valid numpy array
-            if not isinstance(image, np.ndarray):
-                raise ValueError(f"Unable to convert image to numpy array. Image type: {type(image)}")
+            # Process image with DETR
+            inputs = self.detr_processor(images=image, return_tensors="pt").to(self.device)
+            outputs = self.detr_model(**inputs)
             
-            # Ensure image is in the correct format and make a copy
-            if len(image.shape) == 2:  # Grayscale to RGB
-                image = cv2.cvtColor(image, cv2.COLOR_GRAY2RGB)
-            elif image.shape[2] == 4:  # RGBA to RGB
-                image = cv2.cvtColor(image, cv2.COLOR_RGBA2RGB)
-            elif len(image.shape) == 3 and image.shape[2] == 3:
-                # If BGR (OpenCV default), convert to RGB
-                image = cv2.cvtColor(image, cv2.COLOR_BGR2RGB)
-            
-            # Ensure image is contiguous and in the correct dtype
-            image = np.ascontiguousarray(image, dtype=np.uint8)
-            
-            # Add debug logging
-            logger.info(f"Image shape after conversion: {image.shape}")
-            logger.info(f"Image dtype: {image.dtype}")
-            logger.info(f"Image is contiguous: {image.flags['C_CONTIGUOUS']}")
-            
-            # Process image through DETR
-            inputs = self.detr_processor(images=image, return_tensors="pt")
-            inputs = {k: v.to(self.device) for k, v in inputs.items()}
-            
-            with torch.no_grad():
-                outputs = self.detr_model(**inputs)
-            
-            # Define maximum reasonable dimensions (in inches)
-            MAX_DIMENSIONS = {
-                'bed': {'width': 84, 'depth': 84, 'height': 48},
-                'dining table': {'width': 72, 'depth': 42, 'height': 30},
-                'chair': {'width': 30, 'depth': 30, 'height': 45},
-                'sofa': {'width': 84, 'depth': 40, 'height': 38},
-                'tv': {'width': 65, 'depth': 4, 'height': 40},
-                'person': {'width': 24, 'depth': 12, 'height': 72},
-                'remote': {'width': 6, 'depth': 2, 'height': 8},
-                'knife': {'width': 12, 'depth': 1, 'height': 2},
-                'umbrella': {'width': 36, 'depth': 4, 'height': 36},
-                'suitcase': {'width': 30, 'depth': 12, 'height': 20},
-                'default': {'width': 48, 'depth': 24, 'height': 48}
-            }
-
-            # Assumed camera parameters if calibration fails
-            ASSUMED_FOV = 60  # degrees
-            ASSUMED_DISTANCE = 120  # inches (10 feet)
-            
-            # Process DETR results
-            target_sizes = torch.tensor([image.shape[:2]])
+            # Convert outputs to detections
+            target_sizes = torch.tensor([image.size[::-1]]).to(self.device)
             results = self.detr_processor.post_process_object_detection(
-                outputs, target_sizes=target_sizes
+                outputs, 
+                target_sizes=target_sizes, 
+                threshold=0.7
             )[0]
             
-            formatted_detections = []
+            detections = []
             for score, label, box in zip(results["scores"], results["labels"], results["boxes"]):
-                if score > 0.7:  # Confidence threshold
-                    box = box.tolist()
-                    label_name = self.detr_model.config.id2label[label.item()]
-                    
-                    # Get max dimensions for this object type
-                    max_dims = MAX_DIMENSIONS.get(label_name.lower(), MAX_DIMENSIONS['default'])
-                    
-                    # Calculate pixel dimensions
-                    pixel_width = box[2] - box[0]
-                    pixel_height = box[3] - box[1]
-                    
-                    # Calculate real-world dimensions using FOV
-                    image_width = image.shape[1]
-                    fov_radians = math.radians(ASSUMED_FOV)
-                    
-                    # Calculate width based on FOV
-                    object_width = (pixel_width / image_width) * (2 * ASSUMED_DISTANCE * math.tan(fov_radians / 2))
-                    object_height = (pixel_height / image_width) * (2 * ASSUMED_DISTANCE * math.tan(fov_radians / 2))
-                    
-                    # Estimate depth based on object type
-                    depth_ratio = {
-                        'bed': 1.0,
-                        'dining table': 0.6,
-                        'chair': 1.0,
-                        'sofa': 0.5,
-                        'tv': 0.1,
-                        'person': 0.5,
-                        'remote': 0.3,
-                        'knife': 0.1,
-                        'umbrella': 0.1,
-                        'suitcase': 0.4,
-                        'default': 0.5
-                    }
-                    object_depth = object_width * depth_ratio.get(label_name.lower(), depth_ratio['default'])
-                    
-                    # Apply maximum constraints
-                    dimensions = {
-                        'length': min(object_width, max_dims['width']),
-                        'width': min(object_depth, max_dims['depth']),
-                        'height': min(object_height, max_dims['height'])
-                    }
-                    
-                    # Round dimensions to one decimal place
-                    dimensions = {k: round(v, 1) for k, v in dimensions.items()}
-                    
-                    # Calculate volume in cubic feet
-                    volume = (dimensions['length'] * dimensions['width'] * dimensions['height']) / 1728
-                    
-                    formatted_detection = {
-                        'type': label_name,
-                        'confidence': float(score),
-                        'dimensions': dimensions,
-                        'volume': round(volume, 2),
-                        'bounding_box': box,
-                        'description': f"Detected {label_name}"
-                    }
-                    formatted_detections.append(formatted_detection)
+                box = [round(i, 2) for i in box.tolist()]
+                
+                # Calculate dimensions
+                dimensions = {
+                    'length': round(box[2] - box[0], 1),
+                    'width': round(box[3] - box[1], 1),
+                    'height': round((box[3] - box[1]) * 0.75, 1)
+                }
+                
+                # Format detection result
+                detection = {
+                    'type': self.detr_model.config.id2label[label.item()],  # Changed 'label' to 'type'
+                    'confidence': float(score.item()),  # Ensure it's a float
+                    'bounding_box': [float(x) for x in box],  # Convert to float list
+                    'dimensions': {
+                        'length': float(dimensions['length']),
+                        'width': float(dimensions['width']),
+                        'height': float(dimensions['height'])
+                    },
+                    'volume': float(
+                        (dimensions['length'] * dimensions['width'] * dimensions['height']) / 1728
+                    ),
+                    'lidar_enhanced': False
+                }
+                detections.append(detection)
             
-            return formatted_detections
+            # If LiDAR data is available, enhance measurements
+            if lidar_data is not None and camera_matrix is not None and extrinsics is not None:
+                # Process LiDAR data
+                object_cloud = self.process_lidar_data(lidar_data)
+                points_2d, points_3d = self.fuse_camera_lidar(
+                    image, 
+                    np.asarray(object_cloud.points), 
+                    camera_matrix, 
+                    extrinsics
+                )
+                
+                # Enhance each detection with LiDAR measurements
+                for detection in detections:
+                    box = detection['bounding_box']
+                    
+                    # Find LiDAR points within the bounding box
+                    mask = (
+                        (points_2d[:, 0] >= box[0]) &
+                        (points_2d[:, 0] <= box[2]) &
+                        (points_2d[:, 1] >= box[1]) &
+                        (points_2d[:, 1] <= box[3])
+                    )
+                    
+                    if np.any(mask):
+                        object_points = points_3d[mask]
+                        
+                        # Calculate actual dimensions from point cloud
+                        min_coords = np.min(object_points, axis=0)
+                        max_coords = np.max(object_points, axis=0)
+                        
+                        # Update dimensions (convert from meters to inches)
+                        dimensions = {
+                            'length': round((max_coords[0] - min_coords[0]) * 39.37, 1),
+                            'width': round((max_coords[1] - min_coords[1]) * 39.37, 1),
+                            'height': round((max_coords[2] - min_coords[2]) * 39.37, 1)
+                        }
+                        
+                        detection['dimensions'] = dimensions
+                        detection['volume'] = round(
+                            (dimensions['length'] * dimensions['width'] * dimensions['height']) / 1728,
+                            2
+                        )
+                        detection['lidar_enhanced'] = True
+            
+            return detections
 
         except Exception as e:
             logger.error(f"Error in detect_and_measure: {str(e)}")
-            logger.error(f"Image type: {type(image)}")
-            if isinstance(image, np.ndarray):
-                logger.error(f"Image shape: {image.shape}")
-                logger.error(f"Image dtype: {image.dtype}")
-            raise Exception(f"Error detecting and measuring furniture: {str(e)}")
+            raise

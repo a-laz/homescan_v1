@@ -18,7 +18,7 @@
                 </div>
                 <div class="card-body">
                     <div class="video-container">
-                        <video id="video" autoplay playsinline class="w-100"></video>
+                        <video id="video" autoplay playsinline muted></video>
                         <canvas id="canvas" style="display: none;"></canvas>
                     </div>
                 </div>
@@ -38,118 +38,9 @@
         </div>
     </div>
 </div>
+{% endblock content %}
 
-{% block extra_js %}
-<script>
-document.addEventListener('DOMContentLoaded', function() {
-    const video = document.getElementById('video');
-    const canvas = document.getElementById('canvas');
-    const ctx = canvas.getContext('2d');
-    const startButton = document.getElementById('startScan');
-    const stopButton = document.getElementById('stopScan');
-    const status = document.getElementById('status');
-    const results = document.getElementById('results');
-    let isScanning = false;
-    let scanInterval;
-
-    async function setupCamera() {
-        try {
-            const stream = await navigator.mediaDevices.getUserMedia({ 
-                video: { facingMode: 'environment' } 
-            });
-            video.srcObject = stream;
-            return true;
-        } catch (err) {
-            console.error('Error accessing camera:', err);
-            status.textContent = 'Camera Error';
-            status.className = 'badge bg-danger';
-            return false;
-        }
-    }
-
-    async function processScan() {
-        if (!isScanning) return;
-
-        canvas.width = video.videoWidth;
-        canvas.height = video.videoHeight;
-        ctx.drawImage(video, 0, 0);
-        
-        const imageData = canvas.toDataURL('image/jpeg');
-        
-        try {
-            console.log('Sending frame for processing...');
-            const response = await fetch('{% url "scanner:process_frame" %}', {
-                method: 'POST',
-                headers: {
-                    'Content-Type': 'application/json',
-                    'X-CSRFToken': '{{ csrf_token }}'
-                },
-                body: JSON.stringify({
-                    room_id: '{{ room.id }}',
-                    image: imageData
-                })
-            });
-
-            const data = await response.json();
-            console.log('Received response:', data);
-            
-            if (data.status === 'success') {
-                updateResults(data.detections);
-                if (data.image) {
-                    const img = new Image();
-                    img.src = data.image;
-                    img.onload = () => ctx.drawImage(img, 0, 0);
-                } 
-            } else {
-                console.error('Error processing scan:', data.message);
-                status.textContent = 'Error: ' + data.message;
-                status.className = 'badge bg-danger';
-            }
-        } catch (err) {
-            console.error('Error processing scan:', err);
-            status.textContent = 'Error: ' + err.message;
-            status.className = 'badge bg-danger';
-        }
-    }
-
-    function updateResults(detections) {
-        results.innerHTML = detections.map(detection => `
-            <div class="list-group-item">
-                <h6 class="mb-1">${detection.label}</h6>
-                <small>
-                    Dimensions: ${detection.dimensions.length}″ × 
-                    ${detection.dimensions.width}″ × 
-                    ${detection.dimensions.height}″
-                </small><br>
-                <small>Volume: ${detection.volume.toFixed(2)} cu ft</small><br>
-                <small>Confidence: ${(detection.confidence * 100).toFixed(1)}%</small>
-            </div>
-        `).join('');
-    }
-
-    startButton.addEventListener('click', async () => {
-        if (await setupCamera()) {
-            isScanning = true;
-            startButton.style.display = 'none';
-            stopButton.style.display = 'inline-block';
-            status.textContent = 'Scanning';
-            status.className = 'badge bg-success';
-            scanInterval = setInterval(processScan, 1000);
-        }
-    });
-
-    stopButton.addEventListener('click', () => {
-        isScanning = false;
-        clearInterval(scanInterval);
-        startButton.style.display = 'inline-block';
-        stopButton.style.display = 'none';
-        status.textContent = 'Ready';
-        status.className = 'badge bg-secondary';
-    });
-});
-</script>
-{% endblock %}
-
+{% block extra_css %}
 <style>
 .video-container {
     position: relative;
@@ -183,4 +74,211 @@ document.addEventListener('DOMContentLoaded', function() {
     background-color: #f8f9fa;
 }
 </style>
-{% endblock %}
+{% endblock extra_css %}
+
+{% block extra_js %}
+<script>
+document.addEventListener('DOMContentLoaded', async function() {
+    const video = document.getElementById('video');
+    const canvas = document.getElementById('canvas');
+    const ctx = canvas.getContext('2d');
+    const startButton = document.getElementById('startScan');
+    const stopButton = document.getElementById('stopScan');
+    const status = document.getElementById('status');
+    const results = document.getElementById('results');
+    let isScanning = false;
+    let scanInterval;
+    let arSession = null;
+    let isLiDARAvailable = false;
+
+    async function setupCamera() {
+        try {
+            // Force browser to show permission prompt
+            await navigator.mediaDevices.getUserMedia({ audio: false, video: true });
+            
+            // Enumerate devices after permission is granted
+            const devices = await navigator.mediaDevices.enumerateDevices();
+            const videoDevices = devices.filter(device => device.kind === 'videoinput');
+            console.log('Video devices after permission:', videoDevices);
+
+            if (videoDevices.length === 0) {
+                throw new Error('No video devices found after permission granted');
+            }
+
+            // Try to get the video stream
+            const stream = await navigator.mediaDevices.getUserMedia({
+                video: {
+                    deviceId: videoDevices[0].deviceId,
+                    width: { ideal: 1280 },
+                    height: { ideal: 720 }
+                },
+                audio: false
+            });
+
+            video.srcObject = stream;
+            
+            await new Promise((resolve) => {
+                video.onloadedmetadata = () => resolve();
+            });
+
+            return true;
+        } catch (err) {
+            console.error('Detailed camera error:', {
+                name: err.name,
+                message: err.message,
+                stack: err.stack
+            });
+            status.textContent = `Camera Error: ${err.message}`;
+            status.className = 'badge bg-danger';
+            return false;
+        }
+    }
+
+    startButton.addEventListener('click', async () => {
+        console.log('Start button clicked');
+        status.textContent = 'Accessing camera...';
+        
+        // Check if camera permission is already granted
+        try {
+            const permissionStatus = await navigator.permissions.query({ name: 'camera' });
+            console.log('Camera permission status:', permissionStatus.state);
+            
+            if (permissionStatus.state === 'denied') {
+                status.textContent = 'Camera permission denied. Please allow camera access in your browser settings.';
+                status.className = 'badge bg-danger';
+                return;
+            }
+        } catch (err) {
+            console.log('Permission check not supported:', err);
+        }
+        
+        if (await setupCamera()) {
+            console.log('Camera setup successful');
+            isScanning = true;
+            startButton.style.display = 'none';
+            stopButton.style.display = 'inline-block';
+            status.textContent = 'Scanning';
+            status.className = 'badge bg-success';
+            scanInterval = setInterval(processScan, 1000);
+        } else {
+            console.log('Camera setup failed');
+            status.textContent = 'Camera setup failed';
+            status.className = 'badge bg-danger';
+        }
+    });
+
+    stopButton.addEventListener('click', () => {
+        isScanning = false;
+        clearInterval(scanInterval);
+        startButton.style.display = 'inline-block';
+        stopButton.style.display = 'none';
+        status.textContent = isLiDARAvailable ? 'LiDAR Ready' : 'Ready';
+        status.className = isLiDARAvailable ? 'badge bg-info' : 'badge bg-secondary';
+    });
+
+    async function processScan() {
+        if (!isScanning) return;
+
+        try {
+            // Capture current frame
+            canvas.width = video.videoWidth;
+            canvas.height = video.videoHeight;
+            ctx.drawImage(video, 0, 0);
+            
+            // Convert to base64
+            const imageData = canvas.toDataURL('image/jpeg');
+            
+            // Prepare data object
+            const data = {
+                room_id: '{{ room.id }}',
+                image: imageData
+            };
+
+            // Add LiDAR data if available
+            if (isLiDARAvailable && arSession) {
+                try {
+                    const frame = arSession.currentFrame;
+                    if (frame) {
+                        const depthData = await frame.getDepthData();
+                        if (depthData) {
+                            data.lidar = {
+                                points: Array.from(depthData.data),
+                                width: depthData.width,
+                                height: depthData.height
+                            };
+                        }
+                    }
+                } catch (err) {
+                    console.log('LiDAR data not available:', err);
+                }
+            }
+
+            // Send to server
+            console.log('Sending frame for processing...');
+            const response = await fetch('{% url "scanner:process_frame" %}', {
+                method: 'POST',
+                headers: {
+                    'Content-Type': 'application/json',
+                    'X-CSRFToken': '{{ csrf_token }}'
+                },
+                body: JSON.stringify(data)
+            });
+
+            const result = await response.json();
+            console.log('Received detection results:', result);
+
+            if (result.status === 'success') {
+                // Update results display
+                updateResults(result.detections);
+                
+                // If there's a processed image, display it
+                if (result.image) {
+                    const img = new Image();
+                    img.onload = () => {
+                        ctx.drawImage(img, 0, 0, canvas.width, canvas.height);
+                    };
+                    img.src = result.image;
+                }
+            } else {
+                console.error('Error from server:', result.message);
+                status.textContent = 'Processing Error';
+                status.className = 'badge bg-warning';
+            }
+
+        } catch (error) {
+            console.error('Error during scan:', error);
+            status.textContent = 'Error';
+            status.className = 'badge bg-danger';
+        }
+    }
+
+    function updateResults(detections) {
+        results.innerHTML = ''; // Clear existing results
+        
+        if (detections && detections.length > 0) {
+            detections.forEach(detection => {
+                const item = document.createElement('div');
+                item.className = 'list-group-item';
+                item.innerHTML = `
+                    <h6 class="mb-1">${detection.label}</h6>
+                    <p class="mb-1">
+                        Dimensions: ${detection.dimensions.length}″ × 
+                        ${detection.dimensions.width}″ × 
+                        ${detection.dimensions.height}″
+                    </p>
+                    <small>
+                        Volume: ${detection.volume.toFixed(2)} cu ft
+                        <br>
+                        Confidence: ${(detection.confidence * 100).toFixed(1)}%
+                        ${detection.lidar_enhanced ? '<br><span class="text-info">(LiDAR Enhanced)</span>' : ''}
+                    </small>
+                `;
+                results.appendChild(item);
+            });
+        } else {
+            results.innerHTML = '<div class="list-group-item">No furniture detected</div>';
+        }
+    }
+});
+</script>
+{% endblock extra_js %}
