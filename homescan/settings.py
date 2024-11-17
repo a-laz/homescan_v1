@@ -1,6 +1,7 @@
 # homescan/settings.py
 import os
 from pathlib import Path
+import multiprocessing
 
 # Build paths inside the project like this: BASE_DIR / 'subdir'.
 BASE_DIR = Path(__file__).resolve().parent.parent
@@ -176,3 +177,7 @@ ML_SETTINGS = {
     'MAX_DETECTIONS': 10,
     'DEVICE': 'cpu',
 }
+
+# Set multiprocessing start method
+if multiprocessing.get_start_method(allow_none=True) != 'spawn':
+    multiprocessing.set_start_method('spawn', force=True)

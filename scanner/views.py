@@ -15,6 +15,9 @@ from datetime import datetime
 import logging
 from PIL import Image
 import io
+import os
+import uuid
+from django.views.decorators.http import require_http_methods
 
 # Initialize the detector
 detector = EnhancedFurnitureDetector()
@@ -95,14 +98,28 @@ def process_frame(request):
         if image_data and room_id:
             room = get_object_or_404(Room, id=room_id)
             
-            # Process image
-            image_format, image_str = image_data.split(';base64,')
-            image_bytes = base64.b64decode(image_str)
-            image = Image.open(io.BytesIO(image_bytes))
+            # Process image - convert base64 to numpy array
+            try:
+                # Split and decode base64 data
+                image_format, image_str = image_data.split(';base64,')
+                image_bytes = base64.b64decode(image_str)
+                
+                # Convert to numpy array
+                nparr = np.frombuffer(image_bytes, np.uint8)
+                image_np = cv2.imdecode(nparr, cv2.IMREAD_COLOR)
+                
+                # Convert BGR to RGB
+                image_np = cv2.cvtColor(image_np, cv2.COLOR_BGR2RGB)
+                
+                logger.info(f"Image shape after conversion: {image_np.shape}")
+                
+                # Get detections
+                detections = detector.detect_and_measure(image_np)
+                logger.info(f"Detections found: {len(detections)}")
 
-            # Get detections without LiDAR for now
-            detections = detector.detect_and_measure(image)
-            logger.info(f"Detections found: {len(detections)}")
+            except Exception as e:
+                logger.error(f"Error processing image: {str(e)}")
+                raise ValueError(f"Invalid image data: {str(e)}")
 
             # Save detections to database
             for detection in detections:
@@ -111,7 +128,7 @@ def process_frame(request):
                     # Calculate volume
                     volume = (dims.get('length', 0) * 
                             dims.get('width', 0) * 
-                            dims.get('height', 0)) / 1728  # Convert to cubic feet
+                            dims.get('height', 0)) / 1728
 
                     # Save to database
                     FurnitureDetection.objects.create(
@@ -122,41 +139,26 @@ def process_frame(request):
                         height=round(float(dims.get('height', 0)), 1),
                         volume=round(float(volume), 2),
                         confidence=round(float(detection.get('confidence', 0)), 2),
-                        image_data=image_data if len(image_data) < 100000 else None  # Only save small images
+                        image_data=image_data if len(image_data) < 100000 else None
                     )
 
-            # Optimize detections for response
-            for detection in detections:
-                optimized_detection = {
-                    'type': detection.get('type', '')[:50],
-                    'confidence': round(float(detection.get('confidence', 0)), 2),
-                }
-                dims = detection.get('dimensions', {})
-                if dims:
-                    optimized_detection['dimensions'] = {
-                        k: round(float(v), 1) 
-                        for k, v in dims.items()
-                        if isinstance(v, (int, float)) and v > 0
-                    }
-                result['detections'].append(optimized_detection)
-
             # Process image for response
-            max_size = 400
-            if image.width > max_size or image.height > max_size:
-                ratio = max_size / max(image.width, image.height)
-                new_size = (int(image.width * ratio), int(image.height * ratio))
-                image = image.resize(new_size, Image.Resampling.LANCZOS)
+            if image_np.shape[0] > 400 or image_np.shape[1] > 400:
+                ratio = 400 / max(image_np.shape[0], image_np.shape[1])
+                new_size = (int(image_np.shape[1] * ratio), int(image_np.shape[0] * ratio))
+                image_np = cv2.resize(image_np, new_size, interpolation=cv2.INTER_LANCZOS4)
             
-            buffer = io.BytesIO()
-            image = image.convert('RGB')
-            image.save(buffer, format='JPEG', quality=50, optimize=True)
+            # Convert back to base64 for response
+            _, buffer = cv2.imencode('.jpg', cv2.cvtColor(image_np, cv2.COLOR_RGB2BGR), 
+                                   [cv2.IMWRITE_JPEG_QUALITY, 50])
+            image_data = base64.b64encode(buffer).decode()
             
-            image_data = base64.b64encode(buffer.getvalue()).decode()
             if len(image_data) > 100000:
-                image = image.resize((int(image.width * 0.7), int(image.height * 0.7)))
-                buffer = io.BytesIO()
-                image.save(buffer, format='JPEG', quality=40, optimize=True)
-                image_data = base64.b64encode(buffer.getvalue()).decode()
+                new_size = (int(image_np.shape[1] * 0.7), int(image_np.shape[0] * 0.7))
+                image_np = cv2.resize(image_np, new_size, interpolation=cv2.INTER_LANCZOS4)
+                _, buffer = cv2.imencode('.jpg', cv2.cvtColor(image_np, cv2.COLOR_RGB2BGR), 
+                                       [cv2.IMWRITE_JPEG_QUALITY, 40])
+                image_data = base64.b64encode(buffer).decode()
             
             result['image'] = f'data:image/jpeg;base64,{image_data}'
 
@@ -275,3 +277,32 @@ def room_statistics(request, room_id):
         'stats': stats
     }
     return render(request, 'scanner/statistics.html', context)
+
+@require_http_methods(["POST"])
+def process_video(request):
+    try:
+        video_file = request.FILES.get('video')
+        if not video_file:
+            return JsonResponse({'error': 'No video file provided'}, status=400)
+        
+        # Save video temporarily
+        temp_path = f'/tmp/upload_{uuid.uuid4()}.mp4'
+        with open(temp_path, 'wb+') as destination:
+            for chunk in video_file.chunks():
+                destination.write(chunk)
+        
+        # Process video
+        detector = EnhancedFurnitureDetector()
+        detections = detector.process_video(temp_path)
+        
+        # Clean up
+        os.remove(temp_path)
+        
+        return JsonResponse({
+            'success': True,
+            'detections': detections
+        })
+        
+    except Exception as e:
+        logger.error(f"Error processing video: {str(e)}")
+        return JsonResponse({'error': str(e)}, status=500)
