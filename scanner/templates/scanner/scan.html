@@ -14,6 +14,7 @@
                         <span id="status" class="badge bg-secondary">Ready</span>
                         <button id="startScan" class="btn btn-primary ms-2">Start Scan</button>
                         <button id="stopScan" class="btn btn-danger ms-2" style="display: none;">Stop</button>
+                        <button onclick="switchCamera()" id="switchCam">Switch Camera</button>
                     </div>
                 </div>
                 <div class="card-body">
@@ -90,47 +91,35 @@ document.addEventListener('DOMContentLoaded', async function() {
     let scanInterval;
     let arSession = null;
     let isLiDARAvailable = false;
+    let currentFacingMode = 'environment';
 
-    async function setupCamera() {
-        try {
-            // Force browser to show permission prompt
-            await navigator.mediaDevices.getUserMedia({ audio: false, video: true });
-            
-            // Enumerate devices after permission is granted
-            const devices = await navigator.mediaDevices.enumerateDevices();
-            const videoDevices = devices.filter(device => device.kind === 'videoinput');
-            console.log('Video devices after permission:', videoDevices);
-
-            if (videoDevices.length === 0) {
-                throw new Error('No video devices found after permission granted');
+    async function initCamera() {
+        const constraints = {
+            video: {
+                facingMode: { exact: "environment" }  // This specifies the back camera
             }
+        };
 
-            // Try to get the video stream
-            const stream = await navigator.mediaDevices.getUserMedia({
-                video: {
-                    deviceId: videoDevices[0].deviceId,
-                    width: { ideal: 1280 },
-                    height: { ideal: 720 }
-                },
-                audio: false
-            });
-
+        try {
+            const video = document.getElementById('video');
+            const stream = await navigator.mediaDevices.getUserMedia(constraints);
             video.srcObject = stream;
-            
-            await new Promise((resolve) => {
-                video.onloadedmetadata = () => resolve();
-            });
-
+            await video.play();
             return true;
         } catch (err) {
-            console.error('Detailed camera error:', {
-                name: err.name,
-                message: err.message,
-                stack: err.stack
-            });
-            status.textContent = `Camera Error: ${err.message}`;
-            status.className = 'badge bg-danger';
-            return false;
+            // Fallback to any available camera if back camera fails
+            try {
+                const stream = await navigator.mediaDevices.getUserMedia({ 
+                    video: true 
+                });
+                video.srcObject = stream;
+                await video.play();
+                console.error('Back camera error, using fallback:', err);
+                return true;
+            } catch (fallbackErr) {
+                console.error('Camera setup completely failed:', fallbackErr);
+                return false;
+            }
         }
     }
 
@@ -152,7 +141,7 @@ document.addEventListener('DOMContentLoaded', async function() {
             console.log('Permission check not supported:', err);
         }
         
-        if (await setupCamera()) {
+        if (await initCamera()) {
             console.log('Camera setup successful');
             isScanning = true;
             startButton.style.display = 'none';
@@ -277,6 +266,29 @@ document.addEventListener('DOMContentLoaded', async function() {
             });
         } else {
             results.innerHTML = '<div class="list-group-item">No furniture detected</div>';
+        }
+    }
+
+    async function switchCamera() {
+        currentFacingMode = currentFacingMode === 'environment' ? 'user' : 'environment';
+        
+        const video = document.getElementById('video');
+        // Stop current stream
+        if (video.srcObject) {
+            video.srcObject.getTracks().forEach(track => track.stop());
+        }
+        
+        // Start new stream with different camera
+        try {
+            const stream = await navigator.mediaDevices.getUserMedia({
+                video: {
+                    facingMode: { exact: currentFacingMode }
+                }
+            });
+            video.srcObject = stream;
+            await video.play();
+        } catch (err) {
+            console.error('Failed to switch camera:', err);
         }
     }
 });

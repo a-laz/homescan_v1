@@ -27,6 +27,7 @@ INSTALLED_APPS = [
     'rest_framework',
     'channels',
     'corsheaders',
+    'sslserver',
     
     # Local apps
     'scanner.apps.ScannerConfig',
@@ -125,10 +126,24 @@ REST_FRAMEWORK = {
     'PAGE_SIZE': 10,
 }
 
+ALLOWED_HOSTS = [
+    'localhost',
+    '127.0.0.1',
+    # Change this to the IP address of the machine running the server
+    '192.168.1.113',
+    'x',
+]
+
+SECURE_SSL_REDIRECT = False
+SESSION_COOKIE_SECURE = False
+CSRF_COOKIE_SECURE = False
+
 # CORS settings
 CORS_ALLOWED_ORIGINS = [
-    "http://localhost:8000",
-    "http://127.0.0.1:8000",
+    "https://localhost:8000",
+    "https://127.0.0.1:8000",
+    # Change this to the IP address of the machine running the server
+    "https://192.168.1.113:8000",
 ]
 CORS_ALLOW_CREDENTIALS = True
 

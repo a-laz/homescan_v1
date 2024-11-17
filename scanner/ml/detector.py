@@ -13,6 +13,7 @@ import open3d as o3d
 import base64
 from io import BytesIO
 from segment_anything import sam_model_registry, SamPredictor
+from ultralytics import YOLO
 
 # Set up logging
 logging.basicConfig(level=logging.INFO)
@@ -111,27 +112,46 @@ class EnhancedFurnitureDetector:
         self.index = faiss.IndexFlatL2(self.embed_dimension)
         self.add_knowledge_to_index()
 
-        # Define standard dimensions for different furniture types
-        self.MAX_DIMENSIONS = {
-            'chair': {'width': 30, 'depth': 30, 'height': 45},
-            'table': {'width': 72, 'depth': 42, 'height': 31},
-            'sofa': {'width': 84, 'depth': 40, 'height': 38},
-            'bookshelf': {'width': 48, 'depth': 24, 'height': 72},
-            'bed': {'width': 76, 'depth': 80, 'height': 45},
-            'dresser': {'width': 60, 'depth': 24, 'height': 36},
-            'default': {'width': 84, 'depth': 84, 'height': 84}
-        }
-        
-        self.DEPTH_RATIOS = {
-            'chair': 0.9,
-            'table': 1.2,
-            'sofa': 0.8,
-            'bookshelf': 0.4,
-            'bed': 1.0,
-            'dresser': 0.5,
-            'default': 0.8
+        # Update standard dimensions for common objects (in inches)
+        self.STANDARD_DIMENSIONS = {
+            'tv': {'width': 55, 'depth': 4, 'height': 32},
+            'person': {'width': 24, 'depth': 12, 'height': 70},
+            'potted plant': {'width': 12, 'depth': 12, 'height': 24},
+            'dining table': {'width': 60, 'depth': 36, 'height': 30},
+            'laptop': {'width': 14, 'depth': 10, 'height': 1},
+            'remote': {'width': 2, 'depth': 1, 'height': 6},
+            'book': {'width': 9, 'depth': 6, 'height': 1},
+            'chair': {'width': 20, 'depth': 22, 'height': 32},
+            'couch': {'width': 72, 'depth': 35, 'height': 36},
+            'default': {'width': 24, 'depth': 24, 'height': 24}
         }
 
+        # Add maximum allowable dimensions (1.5x standard size)
+        self.MAX_DIMENSIONS = {
+            'tv': {'width': 85, 'depth': 6, 'height': 48},
+            'person': {'width': 36, 'depth': 18, 'height': 84},
+            'potted plant': {'width': 24, 'depth': 24, 'height': 48},
+            'dining table': {'width': 96, 'depth': 48, 'height': 36},
+            'laptop': {'width': 17, 'depth': 12, 'height': 2},
+            'remote': {'width': 3, 'depth': 2, 'height': 8},
+            'book': {'width': 12, 'depth': 9, 'height': 3},
+            'chair': {'width': 30, 'depth': 33, 'height': 48},
+            'couch': {'width': 108, 'depth': 52, 'height': 54},
+            'default': {'width': 36, 'depth': 36, 'height': 36}
+        }
+        
+        # Initialize ArUco detector correctly
+        self.aruco_dict = cv2.aruco.getPredefinedDictionary(cv2.aruco.DICT_4X4_100)
+        self.aruco_params = cv2.aruco.DetectorParameters()
+        self.aruco_detector = cv2.aruco.ArucoDetector(self.aruco_dict, self.aruco_params)
+        
+        # Known size objects database
+        self.reference_sizes = {
+            'credit_card': (3.37, 2.125),  # inches
+            'dollar_bill': (6.14, 2.61),
+            'aruco_marker': (4.0, 4.0)  # custom printed size
+        }
+        
         # Add LiDAR configuration
         self.lidar_config = {
             'min_depth': 0.1,  # meters
@@ -141,9 +161,14 @@ class EnhancedFurnitureDetector:
 
         # Initialize SAM2
         logger.info("Initializing SAM2...")
-        self.sam = sam_model_registry["vit_h"](checkpoint="sam_vit_h_4b8939.pth")
+        self.sam = sam_model_registry["vit_l"](checkpoint="sam_vit_l_0b3195.pth")
         self.sam.to(self.device)
         self.sam_predictor = SamPredictor(self.sam)
+
+        # Use YOLOv8x instead of smaller variants
+        self.model = YOLO('yolov8x.pt')
+        
+        logger.info("EnhancedFurnitureDetector initialized successfully")
 
     def create_knowledge_base(self):
         """Create furniture knowledge base."""
@@ -281,15 +306,34 @@ class EnhancedFurnitureDetector:
         
         return refined_boxes, masks
 
-    def _apply_constraints(self, dimensions, furniture_type):
-        """Apply furniture-specific constraints to dimensions."""
-        max_dims = self.MAX_DIMENSIONS.get(furniture_type, self.MAX_DIMENSIONS['default'])
-        
-        return {
-            'length': round(min(dimensions['length'], max_dims['width']), 1),
-            'width': round(min(dimensions['width'], max_dims['depth']), 1),
-            'height': round(min(dimensions['height'], max_dims['height']), 1)
-        }
+    def _apply_constraints(self, dimensions, object_type):
+        """Apply realistic constraints to object dimensions"""
+        try:
+            # Get standard dimensions for this type
+            standard = self.STANDARD_DIMENSIONS.get(object_type.lower(), self.STANDARD_DIMENSIONS['default'])
+            max_dims = self.MAX_DIMENSIONS.get(object_type.lower(), self.MAX_DIMENSIONS['default'])
+            
+            # Calculate scaling factors
+            width_scale = dimensions['length'] / standard['width']
+            height_scale = dimensions['height'] / standard['height']
+            depth_scale = dimensions['width'] / standard['depth']
+            
+            # Use a conservative scale factor
+            scale_factor = min(width_scale, height_scale, depth_scale, 1.5)
+            scale_factor = max(0.5, min(scale_factor, 1.5))  # Limit between 0.5x and 1.5x
+            
+            # Apply scaling with maximum limits
+            constrained_dims = {
+                'length': min(round(standard['width'] * scale_factor, 1), max_dims['width']),
+                'width': min(round(standard['depth'] * scale_factor, 1), max_dims['depth']),
+                'height': min(round(standard['height'] * scale_factor, 1), max_dims['height'])
+            }
+            
+            return constrained_dims
+
+        except Exception as e:
+            logger.error(f"Error in dimension constraints: {str(e)}")
+            return dimensions
 
     def calculate_dimensions(self, image, depth_map=None):
         """Calculate dimensions using all available information"""
@@ -381,14 +425,11 @@ class EnhancedFurnitureDetector:
         
         return points_2d, points_3d
 
-    def detect_and_measure(self, image, lidar_data=None, camera_matrix=None, extrinsics=None):
+    def detect_and_measure(self, image):
         """
-        Enhanced detection and measurement using both camera and LiDAR data
+        Enhanced detection and measurement using camera data
         Args:
             image: RGB image
-            lidar_data: LiDAR point cloud data (optional)
-            camera_matrix: Camera intrinsic parameters
-            extrinsics: Camera-LiDAR extrinsic calibration matrix
         """
         try:
             # Convert base64 to image if needed
@@ -412,77 +453,96 @@ class EnhancedFurnitureDetector:
             detections = []
             for score, label, box in zip(results["scores"], results["labels"], results["boxes"]):
                 box = [round(i, 2) for i in box.tolist()]
+                object_type = self.detr_model.config.id2label[label.item()]
                 
-                # Calculate dimensions
-                dimensions = {
-                    'length': round(box[2] - box[0], 1),
-                    'width': round(box[3] - box[1], 1),
-                    'height': round((box[3] - box[1]) * 0.75, 1)
+                # Calculate aspect ratios from bounding box
+                box_width = box[2] - box[0]
+                box_height = box[3] - box[1]
+                aspect_ratio = box_width / box_height
+                
+                # Get standard dimensions for this type
+                standard = self.STANDARD_DIMENSIONS.get(object_type.lower(), self.STANDARD_DIMENSIONS['default'])
+                
+                # Calculate scaling factor based on aspect ratio
+                standard_ratio = standard['width'] / standard['height']
+                scale_factor = min(box_width / standard['width'], box_height / standard['height'])
+                
+                # Adjust dimensions based on aspect ratio
+                raw_dimensions = {
+                    'length': round(standard['width'] * scale_factor * (aspect_ratio / standard_ratio), 1),
+                    'width': round(standard['depth'] * scale_factor, 1),
+                    'height': round(standard['height'] * scale_factor, 1)
                 }
+                
+                # Apply constraints
+                dimensions = self._apply_constraints(raw_dimensions, object_type)
                 
                 # Format detection result
                 detection = {
-                    'type': self.detr_model.config.id2label[label.item()],  # Changed 'label' to 'type'
-                    'confidence': float(score.item()),  # Ensure it's a float
-                    'bounding_box': [float(x) for x in box],  # Convert to float list
-                    'dimensions': {
-                        'length': float(dimensions['length']),
-                        'width': float(dimensions['width']),
-                        'height': float(dimensions['height'])
-                    },
-                    'volume': float(
-                        (dimensions['length'] * dimensions['width'] * dimensions['height']) / 1728
+                    'type': object_type,
+                    'confidence': float(score.item()),
+                    'bounding_box': [float(x) for x in box],
+                    'dimensions': dimensions,
+                    'volume': round(
+                        (dimensions['length'] * dimensions['width'] * dimensions['height']) / 1728,
+                        2
                     ),
                     'lidar_enhanced': False
                 }
                 detections.append(detection)
-            
-            # If LiDAR data is available, enhance measurements
-            if lidar_data is not None and camera_matrix is not None and extrinsics is not None:
-                # Process LiDAR data
-                object_cloud = self.process_lidar_data(lidar_data)
-                points_2d, points_3d = self.fuse_camera_lidar(
-                    image, 
-                    np.asarray(object_cloud.points), 
-                    camera_matrix, 
-                    extrinsics
-                )
-                
-                # Enhance each detection with LiDAR measurements
-                for detection in detections:
-                    box = detection['bounding_box']
-                    
-                    # Find LiDAR points within the bounding box
-                    mask = (
-                        (points_2d[:, 0] >= box[0]) &
-                        (points_2d[:, 0] <= box[2]) &
-                        (points_2d[:, 1] >= box[1]) &
-                        (points_2d[:, 1] <= box[3])
-                    )
-                    
-                    if np.any(mask):
-                        object_points = points_3d[mask]
-                        
-                        # Calculate actual dimensions from point cloud
-                        min_coords = np.min(object_points, axis=0)
-                        max_coords = np.max(object_points, axis=0)
-                        
-                        # Update dimensions (convert from meters to inches)
-                        dimensions = {
-                            'length': round((max_coords[0] - min_coords[0]) * 39.37, 1),
-                            'width': round((max_coords[1] - min_coords[1]) * 39.37, 1),
-                            'height': round((max_coords[2] - min_coords[2]) * 39.37, 1)
-                        }
-                        
-                        detection['dimensions'] = dimensions
-                        detection['volume'] = round(
-                            (dimensions['length'] * dimensions['width'] * dimensions['height']) / 1728,
-                            2
-                        )
-                        detection['lidar_enhanced'] = True
             
             return detections
 
         except Exception as e:
             logger.error(f"Error in detect_and_measure: {str(e)}")
             raise
+
+    def _measure_with_reference(self, bbox, reference_points):
+        """Calculate real-world dimensions using reference objects in the image"""
+        try:
+            # Find the best reference object to use
+            reference_object = self._select_best_reference(reference_points)
+            if not reference_object:
+                return None
+
+            # Get reference object dimensions (only need to do this once)
+            reference_width = self.reference_sizes[reference_object][0]
+            reference_height = self.reference_sizes[reference_object][1]
+
+            # Get pixel coordinates
+            x1, y1, x2, y2 = bbox
+            object_width_px = x2 - x1
+            object_height_px = y2 - y1
+
+            # Get reference object pixel size
+            ref_x1, ref_y1, ref_x2, ref_y2 = reference_points[reference_object]
+            ref_width_px = ref_x2 - ref_x1
+            ref_height_px = ref_y2 - ref_y1
+
+            # Calculate scaling factors
+            width_scale = reference_width / ref_width_px
+            height_scale = reference_height / ref_height_px
+
+            # Use average scale for more accuracy
+            scale_factor = (width_scale + height_scale) / 2
+
+            # Calculate real dimensions
+            real_width = object_width_px * scale_factor
+            real_height = object_height_px * scale_factor
+            
+            # Estimate depth using perspective and reference object
+            real_depth = self._estimate_depth_from_reference(
+                bbox, 
+                reference_points[reference_object], 
+                scale_factor
+            )
+
+            return {
+                'length': round(real_width, 1),
+                'width': round(real_depth, 1),
+                'height': round(real_height, 1)
+            }
+
+        except Exception as e:
+            logger.error(f"Error in measurement with reference: {str(e)}")
+            return None

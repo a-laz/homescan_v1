@@ -24,12 +24,15 @@
             <div class="card">
                 <div class="card-body">
                     <h5 class="card-title">Room Dimensions</h5>
-                    <ul class="list-unstyled">
-                        <li>Length: {{ room.dimensions.length }} inches</li>
-                        <li>Width: {{ room.dimensions.width }} inches</li>
-                        <li>Height: {{ room.dimensions.height }} inches</li>
-                        <li>Volume: {{ room.total_volume|floatformat:2 }} cu ft</li>
-                    </ul>
+                    {% with dims=room.get_dimensions %}
+                    <div class="room-info">
+                        <h3>Room Dimensions</h3>
+                        <p>Length: {{ dims.length }}"</p>
+                        <p>Width: {{ dims.width }}"</p>
+                        <p>Height: {{ dims.height }}"</p>
+                        <p>Total Volume: {{ room.total_volume }} cu ft</p>
+                    </div>
+                    {% endwith %}
                 </div>
             </div>
         </div>
@@ -54,9 +57,9 @@
                                     <tr>
                                         <td>{{ detection.furniture_type }}</td>
                                         <td>
-                                            {{ detection.dimensions.length }}″ × 
-                                            {{ detection.dimensions.width }}″ × 
-                                            {{ detection.dimensions.height }}″
+                                            {{ detection.length }}″ × 
+                                            {{ detection.width }}″ × 
+                                            {{ detection.height }}″
                                         </td>
                                         <td>{{ detection.volume|floatformat:2 }} cu ft</td>
                                         <td>{{ detection.confidence|floatformat:2 }}</td>

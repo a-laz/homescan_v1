@@ -13,6 +13,8 @@ import cv2
 import numpy as np
 from datetime import datetime
 import logging
+from PIL import Image
+import io
 
 # Initialize the detector
 detector = EnhancedFurnitureDetector()
@@ -38,13 +40,11 @@ def home(request):
 def room_detail(request, room_id):
     """Detailed view of a single room."""
     room = get_object_or_404(Room, id=room_id, user=request.user)
-    detections = FurnitureDetection.objects.filter(room=room).order_by('-timestamp')
-    total_volume = sum(detection.volume for detection in detections)
+    detections = FurnitureDetection.objects.filter(room=room).order_by('-timestamp')[:50]
     
     context = {
         'room': room,
         'detections': detections,
-        'total_volume': round(total_volume, 2)
     }
     return render(request, 'scanner/room_detail.html', context)
 
@@ -82,149 +82,117 @@ def scan_history(request, room_id):
 @login_required
 def process_frame(request):
     """Process uploaded frame from scanner."""
-    if request.method == 'POST':
-        try:
-            data = json.loads(request.body)
-            room_id = data.get('room_id')
-            image_data = data.get('image')
-            lidar_data = data.get('lidar')
-            
-            if not room_id or not image_data:
-                return JsonResponse({
-                    'status': 'error',
-                    'message': 'Missing room_id or image data'
-                })
-            
-            # Get room
-            room = get_object_or_404(Room, id=room_id, user=request.user)
-            
-            # Convert base64 to image
-            try:
-                # Remove data URL prefix if present
-                if ',' in image_data:
-                    image_data = image_data.split(',')[1]
-                
-                # Decode base64 to bytes
-                image_bytes = base64.b64decode(image_data)
-                
-                # Convert to numpy array
-                nparr = np.frombuffer(image_bytes, np.uint8)
-                image = cv2.imdecode(nparr, cv2.IMREAD_COLOR)
+    try:
+        result = {
+            'status': 'success',
+            'detections': []
+        }
 
-                if image is None:
-                    raise ValueError("Failed to decode image")
-                
-                logger.info(f"Image shape before detection: {image.shape}")
-                logger.info(f"Image dtype before detection: {image.dtype}")
-                
-            except Exception as e:
-                return JsonResponse({
-                    'status': 'error',
-                    'message': f"Error processing image: {str(e)}"
-                })
+        data = json.loads(request.body)
+        room_id = data.get('room_id')
+        image_data = data.get('image')
+        
+        if image_data and room_id:
+            room = get_object_or_404(Room, id=room_id)
             
-            # Process LiDAR data if available
-            if lidar_data:
-                lidar_points = np.array(lidar_data['points'])
-                camera_matrix = np.array(data.get('camera_matrix'))
-                extrinsics = np.array(data.get('extrinsics'))
-                
-                detections = detector.detect_and_measure(
-                    image,
-                    lidar_data=lidar_points,
-                    camera_matrix=camera_matrix,
-                    extrinsics=extrinsics
-                )
-            else:
-                detections = detector.detect_and_measure(image)
-                
+            # Process image
+            image_format, image_str = image_data.split(';base64,')
+            image_bytes = base64.b64decode(image_str)
+            image = Image.open(io.BytesIO(image_bytes))
+
+            # Get detections without LiDAR for now
+            detections = detector.detect_and_measure(image)
             logger.info(f"Detections found: {len(detections)}")
 
-            if not detections:
-                return JsonResponse({
-                    'status': 'success',
-                    'detections': [],
-                    'message': 'No furniture detected in frame'
-                })
-            
-            # Draw boxes and labels
-            for detection in detections:
-                box = detection["bounding_box"]  # Updated to match new detector output
-                dimensions = detection["dimensions"]
-                volume = detection["volume"]
-                label = f"{detection['type']} ({volume} cu ft)"  # Updated to match new detector output
-                
-                # Draw bounding box
-                cv2.rectangle(
-                    image,
-                    (int(box[0]), int(box[1])),
-                    (int(box[2]), int(box[3])),
-                    (0, 255, 0),
-                    2
-                )
-                
-                # Draw label with dimensions
-                label_text = f"{label}\n{dimensions['length']}\"x{dimensions['width']}\"x{dimensions['height']}\""
-                y = int(box[1] - 10)
-                for i, line in enumerate(label_text.split('\n')):
-                    y = y + 20
-                    cv2.putText(
-                        image,
-                        line,
-                        (int(box[0]), y),
-                        cv2.FONT_HERSHEY_SIMPLEX,
-                        0.5,
-                        (0, 255, 0),
-                        2
-                    )
-            
-            # Convert back to base64
-            _, buffer = cv2.imencode('.jpg', image)
-            img_base64 = base64.b64encode(buffer).decode('utf-8')
-            
             # Save detections to database
             for detection in detections:
-                FurnitureDetection.objects.create(
-                    room=room,
-                    furniture_type=detection['type'],  # Updated to match new detector output
-                    confidence=detection['confidence'],
-                    dimensions=detection['dimensions'],
-                    volume=float(detection['volume']),  # Convert string to float
-                    image=f'data:image/jpeg;base64,{img_base64}',
-                )
+                dims = detection.get('dimensions', {})
+                if dims:
+                    # Calculate volume
+                    volume = (dims.get('length', 0) * 
+                            dims.get('width', 0) * 
+                            dims.get('height', 0)) / 1728  # Convert to cubic feet
+
+                    # Save to database
+                    FurnitureDetection.objects.create(
+                        room=room,
+                        furniture_type=detection.get('type', '')[:50],
+                        length=round(float(dims.get('length', 0)), 1),
+                        width=round(float(dims.get('width', 0)), 1),
+                        height=round(float(dims.get('height', 0)), 1),
+                        volume=round(float(volume), 2),
+                        confidence=round(float(detection.get('confidence', 0)), 2),
+                        image_data=image_data if len(image_data) < 100000 else None  # Only save small images
+                    )
+
+            # Optimize detections for response
+            for detection in detections:
+                optimized_detection = {
+                    'type': detection.get('type', '')[:50],
+                    'confidence': round(float(detection.get('confidence', 0)), 2),
+                }
+                dims = detection.get('dimensions', {})
+                if dims:
+                    optimized_detection['dimensions'] = {
+                        k: round(float(v), 1) 
+                        for k, v in dims.items()
+                        if isinstance(v, (int, float)) and v > 0
+                    }
+                result['detections'].append(optimized_detection)
+
+            # Process image for response
+            max_size = 400
+            if image.width > max_size or image.height > max_size:
+                ratio = max_size / max(image.width, image.height)
+                new_size = (int(image.width * ratio), int(image.height * ratio))
+                image = image.resize(new_size, Image.Resampling.LANCZOS)
             
-            return JsonResponse({
-                'status': 'success',
-                'detections': detections,
-                'image': f'data:image/jpeg;base64,{img_base64}'
-            })
+            buffer = io.BytesIO()
+            image = image.convert('RGB')
+            image.save(buffer, format='JPEG', quality=50, optimize=True)
             
-        except Exception as e:
-            print(f"Error processing frame: {str(e)}")
-            return JsonResponse({
-                'status': 'error',
-                'message': str(e)
-            })
-    
-    return JsonResponse({'status': 'error', 'message': 'Invalid request method'})
+            image_data = base64.b64encode(buffer.getvalue()).decode()
+            if len(image_data) > 100000:
+                image = image.resize((int(image.width * 0.7), int(image.height * 0.7)))
+                buffer = io.BytesIO()
+                image.save(buffer, format='JPEG', quality=40, optimize=True)
+                image_data = base64.b64encode(buffer.getvalue()).decode()
+            
+            result['image'] = f'data:image/jpeg;base64,{image_data}'
+
+        response = JsonResponse(result)
+        if len(response.content) > 500000:
+            del result['image']
+            result['status'] = 'partial'
+            result['message'] = 'Image data omitted due to size constraints'
+            response = JsonResponse(result)
+
+        return response
+
+    except Exception as e:
+        logger.error(f"Error processing frame: {str(e)}")
+        return JsonResponse({
+            'status': 'error',
+            'message': str(e)
+        }, status=500)
 
 @login_required
 def add_room(request):
-    """Add new room."""
     if request.method == 'POST':
-        form = RoomForm(request.POST)
-        if form.is_valid():
-            room = form.save(commit=False)
-            room.user = request.user
-            room.save()
-            messages.success(request, 'Room added successfully!')
+        try:
+            room = Room.objects.create(
+                user=request.user,
+                name=request.POST['name'],
+                description=request.POST['description'],
+                length=float(request.POST['length']),
+                width=float(request.POST['width']),
+                height=float(request.POST['height'])
+            )
             return redirect('scanner:room_detail', room_id=room.id)
-        else:
-            messages.error(request, 'Please correct the errors below.')
-    else:
-        form = RoomForm()
-    
-    return render(request, 'scanner/room_form.html', {'form': form})
+        except (KeyError, ValueError) as e:
+            messages.error(request, 'Invalid room data provided.')
+            return redirect('scanner:home')
+    return redirect('scanner:home')
 
 @login_required
 def edit_room(request, room_id):

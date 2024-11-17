@@ -71,6 +71,75 @@
    python manage.py runserver
    ```
 
+9. **Access from Other Devices** (Optional)
+   To access the web app from other devices on your network (like your phone):
+
+   1. Find your computer's IP address:
+      ```bash
+      # On Windows:
+      ipconfig
+      
+      # On Mac/Linux:
+      ifconfig
+      # or
+      ip addr
+      ```
+      Look for IPv4 address (usually starts with 192.168.x.x or 10.0.x.x)
+
+   2. Update `ALLOWED_HOSTS` in `homescan/settings.py`:
+      ```python
+      ALLOWED_HOSTS = [
+          'localhost',
+          '127.0.0.1',
+          '192.168.1.XXX',  # Replace with your computer's IP address
+      ]
+      ```
+
+   3. Run the server with:
+      ```bash
+      python manage.py runserver 0.0.0.0:8000
+      ```
+
+   4. On your phone or other device:
+      - Connect to the same WiFi network as your computer
+      - Open web browser
+      - Navigate to: `http://192.168.1.XXX:8000` (replace with your computer's IP)
+
+### Accessing Camera on Mobile Devices
+
+### Option 1: Using SSL Server (Recommended for testing)
+
+1. Install django-sslserver:
+   ```bash
+   pip install django-sslserver
+   ```
+
+2. Add 'sslserver' to INSTALLED_APPS in settings.py:
+   ```python
+   INSTALLED_APPS = [
+       ...
+       'sslserver',
+       ...
+   ]
+   ```
+
+3. Run the SSL server:
+   ```bash
+   python manage.py runsslserver 0.0.0.0:8000
+   ```
+
+4. Access the site using HTTPS:
+   ```
+   https://192.168.1.XXX:8000
+   ```
+   Note: You'll need to accept the security warning about the self-signed certificate.
+
+### Troubleshooting Camera Issues
+- Make sure you're using HTTPS
+- Accept any certificate warnings in your browser
+- Grant camera permissions when prompted
+- If using iOS 14+, ensure camera access is enabled in Settings > Privacy > Camera
+
 ### Troubleshooting
 
 - If you encounter any package installation errors, try:
