@@ -1,0 +1,2 @@
+2024-11-17 15:21:28,519 [INFO] __main__:103: Starting Django with args: ['manage.py', 'runsslserver', '0.0.0.0:8000']
+2024-11-17 15:21:28,519 [INFO] __main__:104: Python version: 3.11.10 (main, Nov 14 2024, 04:02:27) [Clang 12.0.5 (clang-1205.0.22.11)]

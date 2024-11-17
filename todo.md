@@ -2,6 +2,31 @@
 
 ## High Priority Features
 
+### Depth-Anything-V2 Integration
+- [ ] Integrate Depth-Anything-V2 for improved depth estimation
+  - [ ] Setup and model initialization
+    - [ ] Download model checkpoints
+    - [ ] Configure for CPU/MPS/GPU
+    - [ ] Handle model loading errors
+  - [ ] Implementation
+    - [ ] Update depth estimation pipeline
+    - [ ] Add fallback mechanisms
+    - [ ] Optimize for real-time use
+  - [ ] Testing and validation
+    - [ ] Compare with current depth estimation
+    - [ ] Benchmark performance
+    - [ ] Validate accuracy improvements
+  - [ ] Integration with existing features
+    - [ ] Update dimension calculation
+    - [ ] Enhance 3D reconstruction
+    - [ ] Improve measurement accuracy
+
+#### Technical Considerations
+- Model optimization for different devices
+- Memory management
+- Performance profiling
+- Error handling and fallbacks
+
 ### 3D Bin Packing for Truck Loading
 - [ ] Implement 3D bin packing algorithm for efficient truck loading
   - [ ] Create truck dimensions model/input

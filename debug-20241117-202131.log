@@ -1,0 +1,17 @@
+2024-11-17 20:21:31,977 [INFO] __main__:103: Starting Django with args: ['manage.py', 'runsslserver', '0.0.0.0:8000']
+2024-11-17 20:21:31,978 [INFO] __main__:104: Python version: 3.11.10 (main, Nov 14 2024, 04:02:27) [Clang 12.0.5 (clang-1205.0.22.11)]
+2024-11-17 20:21:33,400 [INFO] django.utils.autoreload:668: Watching for file changes with StatReloader
+2024-11-17 20:21:53,838 [DEBUG] faiss.loader:86: Environment variable FAISS_OPT_LEVEL is not set, so let's pick the instruction set according to the current CPU
+2024-11-17 20:21:53,841 [INFO] faiss.loader:110: Loading faiss with AVX2 support.
+2024-11-17 20:21:54,078 [INFO] faiss.loader:112: Successfully loaded faiss with AVX2 support.
+2024-11-17 20:22:02,212 [DEBUG] matplotlib:341: matplotlib data path: /Users/mariagorman/Desktop/homescan/venv/lib/python3.11/site-packages/matplotlib/mpl-data
+2024-11-17 20:22:02,252 [DEBUG] matplotlib:341: CONFIGDIR=/Users/mariagorman/.matplotlib
+2024-11-17 20:22:02,254 [DEBUG] matplotlib:1509: interactive is False
+2024-11-17 20:22:02,255 [DEBUG] matplotlib:1510: platform is darwin
+2024-11-17 20:22:02,422 [DEBUG] matplotlib:341: CACHEDIR=/Users/mariagorman/.matplotlib
+2024-11-17 20:22:02,430 [DEBUG] matplotlib.font_manager:1580: Using fontManager instance from /Users/mariagorman/.matplotlib/fontlist-v390.json
+2024-11-17 20:22:03,824 [INFO] scanner.ml.detector:114: Initializing EnhancedFurnitureDetector...
+2024-11-17 20:22:03,837 [INFO] scanner.ml.detector:121: Loading YOLO model...
+2024-11-17 20:22:04,143 [INFO] scanner.ml.detector:123: YOLO model loaded successfully
+2024-11-17 20:22:39,880 [INFO] scanner.ml.detector:145: Loading SAM model...
+2024-11-17 20:22:49,525 [INFO] scanner.ml.detector:153: SAM model loaded successfully
