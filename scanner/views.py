@@ -96,27 +96,36 @@ def process_frame(request):
         data = json.loads(request.body)
         room_id = data.get('room_id')
         image_data = data.get('image')
+        lidar_data = data.get('lidar_points')  # LiDAR point cloud if available
+        tof_data = data.get('tof_data')  # ToF depth data if available
         
         if image_data and room_id:
             room = get_object_or_404(Room, id=room_id)
             
-            # Process image - convert base64 to numpy array
             try:
-                # Split and decode base64 data
+                # Convert base64 image to numpy array
                 image_format, image_str = image_data.split(';base64,')
                 image_bytes = base64.b64decode(image_str)
-                
-                # Convert to numpy array
                 nparr = np.frombuffer(image_bytes, np.uint8)
                 image_np = cv2.imdecode(nparr, cv2.IMREAD_COLOR)
-                
-                # Convert BGR to RGB
                 image_np = cv2.cvtColor(image_np, cv2.COLOR_BGR2RGB)
                 
-                logger.info(f"Image shape after conversion: {image_np.shape}")
+                # Convert sensor data if provided
+                lidar_points = None
+                if lidar_data:
+                    lidar_points = np.array(json.loads(lidar_data))
                 
-                # Get detections
-                detections = detector.detect_and_measure(image_np)
+                tof_array = None
+                if tof_data:
+                    tof_bytes = base64.b64decode(tof_data.split(',')[1])
+                    tof_array = np.frombuffer(tof_bytes, dtype=np.float32).reshape(-1, 1)
+                
+                # Get detections using available sensor data
+                detections = detector.detect_and_measure(
+                    image_np,
+                    lidar_points=lidar_points,
+                    tof_data=tof_array
+                )
                 logger.info(f"Detections found: {len(detections)}")
 
             except Exception as e:

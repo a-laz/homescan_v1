@@ -92,6 +92,8 @@ document.addEventListener('DOMContentLoaded', async function() {
     let arSession = null;
     let isLiDARAvailable = false;
     let currentFacingMode = 'environment';
+    let tofSensor = null;
+    let isToFAvailable = false;
 
     async function initCamera() {
         const constraints = {
@@ -123,37 +125,62 @@ document.addEventListener('DOMContentLoaded', async function() {
         }
     }
 
+    async function initToF() {
+        try {
+            // Try Generic Sensor API first
+            if ('Sensor' in window && 'ProximitySensor' in window) {
+                tofSensor = new ProximitySensor({ frequency: 10 });
+                await tofSensor.start();
+                isToFAvailable = true;
+                console.log('ToF sensor initialized');
+                status.textContent = 'ToF Ready';
+                status.className = 'badge bg-info';
+                return true;
+            }
+            
+            // Try device-specific ToF API
+            if ('tof' in navigator) {
+                tofSensor = await navigator.tof.requestSensor();
+                isToFAvailable = true;
+                console.log('Device-specific ToF sensor initialized');
+                status.textContent = 'ToF Ready';
+                status.className = 'badge bg-info';
+                return true;
+            }
+            
+            console.log('No ToF sensor available');
+            return false;
+        } catch (error) {
+            console.log('ToF initialization failed:', error);
+            return false;
+        }
+    }
+
     startButton.addEventListener('click', async () => {
         console.log('Start button clicked');
-        status.textContent = 'Accessing camera...';
+        status.textContent = 'Initializing sensors...';
         
-        // Check if camera permission is already granted
-        try {
-            const permissionStatus = await navigator.permissions.query({ name: 'camera' });
-            console.log('Camera permission status:', permissionStatus.state);
-            
-            if (permissionStatus.state === 'denied') {
-                status.textContent = 'Camera permission denied. Please allow camera access in your browser settings.';
-                status.className = 'badge bg-danger';
-                return;
-            }
-        } catch (err) {
-            console.log('Permission check not supported:', err);
-        }
-        
-        if (await initCamera()) {
-            console.log('Camera setup successful');
-            isScanning = true;
-            startButton.style.display = 'none';
-            stopButton.style.display = 'inline-block';
-            status.textContent = 'Scanning';
-            status.className = 'badge bg-success';
-            scanInterval = setInterval(processScan, 1000);
-        } else {
-            console.log('Camera setup failed');
+        // Initialize camera and sensors
+        const cameraReady = await initCamera();
+        if (!cameraReady) {
             status.textContent = 'Camera setup failed';
             status.className = 'badge bg-danger';
+            return;
         }
+
+        // Try LiDAR first
+        if (!isLiDARAvailable) {
+            // If LiDAR isn't available, try ToF
+            await initToF();
+        }
+
+        isScanning = true;
+        startButton.style.display = 'none';
+        stopButton.style.display = 'inline-block';
+        status.textContent = isLiDARAvailable ? 'LiDAR Scanning' : 
+                           isToFAvailable ? 'ToF Scanning' : 'Scanning';
+        status.className = 'badge bg-success';
+        scanInterval = setInterval(processScan, 1000);
     });
 
     stopButton.addEventListener('click', () => {
@@ -190,15 +217,36 @@ document.addEventListener('DOMContentLoaded', async function() {
                     if (frame) {
                         const depthData = await frame.getDepthData();
                         if (depthData) {
-                            data.lidar = {
-                                points: Array.from(depthData.data),
-                                width: depthData.width,
-                                height: depthData.height
-                            };
+                            data.lidar_points = Array.from(depthData.data);
                         }
                     }
                 } catch (err) {
                     console.log('LiDAR data not available:', err);
+                }
+            }
+            // Add ToF data if available (and LiDAR isn't)
+            else if (isToFAvailable && tofSensor && !data.lidar_points) {
+                try {
+                    let tofData;
+                    if (tofSensor instanceof ProximitySensor) {
+                        // Generic Sensor API
+                        tofData = await new Promise(resolve => {
+                            tofSensor.onreading = () => {
+                                const buffer = new Float32Array([tofSensor.distance]);
+                                const base64 = btoa(String.fromCharCode.apply(null, new Uint8Array(buffer.buffer)));
+                                resolve(`data:application/octet-stream;base64,${base64}`);
+                            };
+                        });
+                    } else {
+                        // Device-specific ToF API
+                        const reading = await tofSensor.getReading();
+                        const buffer = new Float32Array(reading.depthMap);
+                        const base64 = btoa(String.fromCharCode.apply(null, new Uint8Array(buffer.buffer)));
+                        tofData = `data:application/octet-stream;base64,${base64}`;
+                    }
+                    data.tof_data = tofData;
+                } catch (err) {
+                    console.log('ToF data not available:', err);
                 }
             }
 
@@ -260,6 +308,7 @@ document.addEventListener('DOMContentLoaded', async function() {
                         <br>
                         Confidence: ${(detection.confidence * 100).toFixed(1)}%
                         ${detection.lidar_enhanced ? '<br><span class="text-info">(LiDAR Enhanced)</span>' : ''}
+                        ${detection.tof_enhanced ? '<br><span class="text-info">(ToF Enhanced)</span>' : ''}
                     </small>
                 `;
                 results.appendChild(item);

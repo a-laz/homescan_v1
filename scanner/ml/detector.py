@@ -158,6 +158,11 @@ class EnhancedFurnitureDetector:
                 'default': 0.45
             }
             
+            # ToF sensor parameters
+            self.TOF_MAX_RANGE = 4.0  # meters
+            self.TOF_MIN_RANGE = 0.2  # meters
+            self.TOF_FOV = 27  # degrees, typical for ToF sensors
+            
         except Exception as e:
             logger.error(f"Error initializing detector: {str(e)}")
             raise
@@ -383,10 +388,10 @@ class EnhancedFurnitureDetector:
             logger.error(f"Error in dimension constraints: {str(e)}")
             return dimensions
 
-    def calculate_dimensions(self, image, depth_map=None):
-        """Calculate dimensions using all available information"""
-        # Ensure camera is calibrated
-        camera_matrix, dist_coeffs, fov = self.camera_calibrator.calibrate_from_image(image)
+    def calculate_dimensions(self, image, depth_map=None, lidar_points=None, tof_data=None):
+        """Calculate dimensions using all available sensor data"""
+        # Get depth data from available sensors
+        depth_map = self.get_depth_data(image, lidar_points, tof_data)
         
         # Get object detections
         boxes, scores, labels = self.detect_objects(image)
@@ -899,6 +904,67 @@ class EnhancedFurnitureDetector:
             if not is_duplicate:
                 selected.append(det)
         return selected
+
+    def process_tof_data(self, tof_data, image_shape):
+        """Process ToF sensor data for depth estimation
+        Args:
+            tof_data: Raw ToF depth measurements (numpy array)
+            image_shape: Shape of the RGB image (height, width)
+        Returns:
+            depth_map: Processed depth map aligned with RGB image
+        """
+        try:
+            # Validate input
+            if not isinstance(tof_data, np.ndarray):
+                raise ValueError(f"Expected numpy array for ToF data, got {type(tof_data)}")
+            
+            # Clean ToF data
+            depth_map = np.clip(tof_data, self.TOF_MIN_RANGE, self.TOF_MAX_RANGE)
+            depth_map[np.isnan(depth_map)] = self.TOF_MAX_RANGE
+            
+            # Normalize to 0-1 range
+            depth_map = (depth_map - self.TOF_MIN_RANGE) / (self.TOF_MAX_RANGE - self.TOF_MIN_RANGE)
+            
+            # Resize to match RGB image
+            depth_map = cv2.resize(depth_map, (image_shape[1], image_shape[0]))
+            
+            return depth_map
+            
+        except Exception as e:
+            logger.error(f"Error processing ToF data: {str(e)}")
+            return None
+
+    def get_depth_data(self, image, lidar_points=None, tof_data=None):
+        """Get depth data using available sensors
+        Args:
+            image: RGB image (numpy array)
+            lidar_points: Optional LiDAR point cloud data
+            tof_data: Optional ToF sensor data
+        Returns:
+            depth_map: Processed depth map
+        """
+        try:
+            if lidar_points is not None:
+                # Use LiDAR if available
+                object_cloud = self.process_lidar_data(lidar_points)
+                depth_map = self.project_point_cloud(object_cloud, image.shape)
+                logger.info("Using LiDAR data for depth estimation")
+                
+            elif tof_data is not None:
+                # Fall back to ToF if available
+                depth_map = self.process_tof_data(tof_data, image.shape)
+                logger.info("Using ToF data for depth estimation")
+                
+            else:
+                # Fall back to monocular depth estimation
+                depth_map = self.estimate_depth(image)
+                logger.info("Using monocular depth estimation")
+            
+            return depth_map
+            
+        except Exception as e:
+            logger.error(f"Error getting depth data: {str(e)}")
+            return self.estimate_depth(image)  # Fall back to monocular estimation
 
 class ValidationError(Exception):
     pass
