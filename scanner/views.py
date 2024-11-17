@@ -47,9 +47,13 @@ def room_detail(request, room_id):
     room = get_object_or_404(Room, id=room_id, user=request.user)
     detections = FurnitureDetection.objects.filter(room=room).order_by('-timestamp')[:50]
     
+    # Get room summary
+    summary = room.get_summary()
+    
     context = {
         'room': room,
         'detections': detections,
+        'summary': summary,
     }
     return render(request, 'scanner/room_detail.html', context)
 

@@ -55,6 +55,34 @@ class Room(models.Model):
         self.volume = dimensions['volume']
         self.save()
 
+    def get_summary(self):
+        """Get room summary including furniture counts and volumes"""
+        detections = self.furnituredetection_set.all()
+        
+        # Count furniture types
+        furniture_types = {}
+        total_volume = 0
+        
+        for detection in detections:
+            # Count furniture types
+            if detection.furniture_type in furniture_types:
+                furniture_types[detection.furniture_type] += 1
+            else:
+                furniture_types[detection.furniture_type] = 1
+            
+            # Sum volumes
+            total_volume += detection.volume
+        
+        return {
+            'furniture_count': len(detections),
+            'total_volume': round(total_volume, 2),
+            'furniture_types': furniture_types
+        }
+
+    def get_recent_detections(self):
+        """Get recent detections for this room"""
+        return self.furnituredetection_set.all().order_by('-timestamp')[:50]
+
 class FurnitureDetection(models.Model):
     room = models.ForeignKey(Room, on_delete=models.CASCADE)
     furniture_type = models.CharField(max_length=50)
