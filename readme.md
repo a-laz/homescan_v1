@@ -1,5 +1,35 @@
 # HomeScan
 
+## MVP (Minimum Viable Product)
+HomeScan's MVP focuses on essential furniture scanning and measurement capabilities:
+
+### Core Features
+- **Real-time Furniture Detection**: Scan rooms using your device's camera
+- **Automatic Measurements**: Get instant dimensions of furniture items
+- **Basic Room Mapping**: Create simple room layouts with furniture placement
+- **Scan History**: View and manage previous room scans
+- **Export Options**: Generate basic reports in PDF/CSV formats
+
+### Technical Implementation
+- Computer Vision: YOLOv8 for object detection
+- Segmentation: SAM2 for precise furniture boundaries
+- Depth Sensing: LiDAR (when available) with ToF/monocular fallback
+- Web Interface: Django backend with responsive frontend
+- Data Storage: SQLite for MVP phase
+
+### Current Limitations
+- Limited furniture type recognition
+- Basic dimension accuracy without LiDAR
+- Simple room visualization
+- Single-user focus
+
+### Next Steps
+- Enhanced furniture recognition
+- Improved measurement accuracy
+- 3D room visualization
+- Multi-user support
+- Moving company integration
+
 ## Installation Guide
 
 ### Prerequisites
