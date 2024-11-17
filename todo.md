@@ -27,6 +27,31 @@
 - Performance profiling
 - Error handling and fallbacks
 
+### Autodistill YOLO Training Integration
+- [ ] Implement zero-annotation YOLO training pipeline
+  - [ ] Setup and configuration
+    - [ ] Install autodistill and required plugins
+    - [ ] Configure base models (Grounded SAM)
+    - [ ] Setup YOLOv8 target model
+  - [ ] Dataset preparation
+    - [ ] Create furniture ontology
+    - [ ] Define furniture class mappings
+    - [ ] Setup unlabeled dataset structure
+  - [ ] Training pipeline
+    - [ ] Implement automatic labeling workflow
+    - [ ] Setup model distillation process
+    - [ ] Configure training parameters
+  - [ ] Validation and testing
+    - [ ] Compare with manually labeled data
+    - [ ] Evaluate detection accuracy
+    - [ ] Benchmark performance
+
+#### Technical Considerations
+- Base model selection (Grounded SAM vs DINO)
+- Ontology design for furniture types
+- Training optimization strategies
+- Model evaluation metrics
+
 ### 3D Bin Packing for Truck Loading
 - [ ] Implement 3D bin packing algorithm for efficient truck loading
   - [ ] Create truck dimensions model/input
