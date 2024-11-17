@@ -181,3 +181,8 @@ ML_SETTINGS = {
 # Set multiprocessing start method
 if multiprocessing.get_start_method(allow_none=True) != 'spawn':
     multiprocessing.set_start_method('spawn', force=True)
+
+# Development server settings
+if DEBUG:
+    import ssl
+    ssl._create_default_https_context = ssl._create_unverified_context

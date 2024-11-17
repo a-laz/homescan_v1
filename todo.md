@@ -201,3 +201,42 @@
   - [ ] Code standards
   - [ ] Contributing guidelines
   - [ ] Development setup
+
+### SAM2 Integration Enhancement
+- [ ] Expand SAM2 implementation
+  - [ ] Implement full segmentation pipeline
+    - [ ] Multi-mask output handling
+    - [ ] Confidence scoring for segments
+    - [ ] Instance segmentation refinement
+  - [ ] Performance optimization
+    - [ ] Model quantization
+    - [ ] Batch processing
+    - [ ] GPU acceleration
+  - [ ] Integration with existing detection pipeline
+    - [ ] Combine with YOLO detections
+    - [ ] Merge overlapping segments
+    - [ ] Handle occlusions
+  - [ ] Real-time processing
+    - [ ] Optimize inference speed
+    - [ ] Memory management
+    - [ ] Frame skipping strategy
+  
+#### Advanced Features
+- [ ] Furniture part segmentation
+  - [ ] Identify components (legs, arms, etc.)
+  - [ ] Handle complex furniture shapes
+  - [ ] Custom prompting for furniture types
+- [ ] 3D reconstruction from segments
+  - [ ] Depth estimation enhancement
+  - [ ] Volume calculation improvement
+  - [ ] Surface normal estimation
+
+#### UI Enhancements
+- [ ] Segment visualization
+  - [ ] Interactive segment selection
+  - [ ] Segment editing tools
+  - [ ] Confidence visualization
+- [ ] Real-time feedback
+  - [ ] Progress indicators
+  - [ ] Quality metrics
+  - [ ] Adjustment suggestions

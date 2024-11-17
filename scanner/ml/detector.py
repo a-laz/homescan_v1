@@ -116,52 +116,46 @@ class EnhancedFurnitureDetector:
             # Initialize camera calibrator
             self.camera_calibrator = CameraCalibrator()
             
-            # Initialize YOLO with proper model
-            self.model = YOLO('yolov8x.pt')
+            # Initialize YOLO with proper model and version
+            try:
+                logger.info("Loading YOLO model...")
+                self.model = YOLO('yolov8n.pt')  # Using smaller model for testing
+                logger.info("YOLO model loaded successfully")
+            except Exception as yolo_error:
+                logger.error(f"Error loading YOLO model: {str(yolo_error)}")
+                raise
             
-            # Increase confidence threshold to reduce false positives
-            self.model.conf = 0.45  # Increased from 0.25
-            self.model.iou = 0.35   # Decreased from 0.45 to better handle overlapping objects
-            self.model.imgsz = 640  # Image size
-            self.model.classes = [56, 57, 58, 59, 60, 61, 62, 63, 64, 65, 66, 67]  # Furniture classes only
-            
-            # Updated dimensions for better accuracy
-            self.STANDARD_DIMENSIONS = {
-                'chair': {'width': 20, 'depth': 20, 'height': 30},
-                'table': {'width': 48, 'depth': 30, 'height': 30},
-                'couch': {'width': 84, 'depth': 38, 'height': 34},
-                'bed': {'width': 80, 'depth': 60, 'height': 24},
-                'desk': {'width': 60, 'depth': 30, 'height': 30},
-                'tv': {'width': 48, 'depth': 4, 'height': 27},
-                'book': {'width': 6, 'depth': 9, 'height': 1},
-                'microwave': {'width': 24, 'depth': 19, 'height': 13},  # Standard microwave dimensions
-                'default': {'width': 30, 'depth': 30, 'height': 30}
-            }
-            
-            # Device configuration
+            # Initialize MiDaS for depth estimation
             self.device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
-            logger.info(f"Using device: {self.device}")
             
-            # Initialize knowledge base
-            self.sentence_model = SentenceTransformer('all-MiniLM-L6-v2')
-            self.index = faiss.IndexFlatL2(384)  # 384 is the embedding dimension
-            self.create_knowledge_base()
-            self.add_knowledge_to_index()
+            # Load MiDaS model and transforms
+            model_type = "DPT_Large"
+            self.depth_model = torch.hub.load("intel-isl/MiDaS", model_type)
+            self.depth_model.to(self.device)
+            self.depth_model.eval()
             
-            # Type-specific confidence thresholds
-            self.CONFIDENCE_THRESHOLDS = {
-                'tv': 0.6,
-                'person': 0.7,
-                'chair': 0.5,
-                'couch': 0.5,
-                'microwave': 0.6,
-                'default': 0.45
-            }
+            # Load MiDaS transforms
+            midas_transforms = torch.hub.load("intel-isl/MiDaS", "transforms")
+            if model_type == "DPT_Large" or model_type == "DPT_Hybrid":
+                self.depth_transforms = midas_transforms.dpt_transform
+            else:
+                self.depth_transforms = midas_transforms.small_transform
             
-            # ToF sensor parameters
-            self.TOF_MAX_RANGE = 4.0  # meters
-            self.TOF_MIN_RANGE = 0.2  # meters
-            self.TOF_FOV = 27  # degrees, typical for ToF sensors
+            # Initialize SAM
+            logger.info("Loading SAM model...")
+            sam_checkpoint = "sam_vit_l_0b3195.pth"  # Updated to your model path
+            model_type = "vit_l"  # Changed to vit_l for the large model
+            
+            try:
+                self.sam = sam_model_registry[model_type](checkpoint=sam_checkpoint)
+                self.sam.to(device=self.device)
+                self.sam_predictor = SamPredictor(self.sam)
+                logger.info("SAM model loaded successfully")
+            except Exception as sam_error:
+                logger.error(f"Error loading SAM model: {str(sam_error)}")
+                raise
+            
+            # Rest of initialization...
             
         except Exception as e:
             logger.error(f"Error initializing detector: {str(e)}")
@@ -218,11 +212,13 @@ class EnhancedFurnitureDetector:
             # Debug input
             logger.info(f"Object detection input shape: {image.shape}, dtype: {image.dtype}")
             
-            # Run inference
+            # Run inference with specific parameters
             results = self.model(
                 image,
-                verbose=False,
-                stream=False
+                conf=0.25,  # Confidence threshold
+                iou=0.45,   # NMS IoU threshold
+                classes=None,  # All classes
+                verbose=False
             )
             
             # Process results with better filtering
@@ -236,7 +232,7 @@ class EnhancedFurnitureDetector:
             for result in results:
                 if len(result.boxes) > 0:
                     for box in result.boxes:
-                        if box.conf.item() > self.model.conf:
+                        if box.conf.item() > 0.25:  # Additional confidence check
                             label = result.names[int(box.cls)]
                             score = box.conf.item()
                             bbox = box.xyxy[0].tolist()
@@ -296,12 +292,8 @@ class EnhancedFurnitureDetector:
             if not isinstance(image, np.ndarray):
                 raise ValueError(f"Expected numpy array, got {type(image)}")
             
-            # Create transform
-            transform = self.depth_transforms.dpt_transform if hasattr(self.depth_transforms, 'dpt_transform') \
-                       else self.depth_transforms.small_transform
-            
             # Transform the image
-            input_batch = transform(image).to(self.device)
+            input_batch = self.depth_transforms(image).to(self.device)
             
             # Add batch dimension if needed
             if len(input_batch.shape) == 3:
@@ -331,38 +323,169 @@ class EnhancedFurnitureDetector:
             return np.ones(image.shape[:2], dtype=np.float32) * 0.5
 
     def get_precise_boundaries(self, image, boxes):
-        """Get precise object boundaries using Mask R-CNN and SAM2"""
-        # Initialize SAM with the image
-        if isinstance(image, torch.Tensor):
-            image = (image.cpu().numpy() * 255).astype(np.uint8).transpose(1, 2, 0)
-        self.sam_predictor.set_image(image)
-        
-        refined_boxes = []
-        masks = []
-        
-        # Process each bounding box
-        for box in boxes:
-            # Convert box to input format for SAM
-            input_box = np.array([
-                [box[0], box[1], box[2], box[3]]
-            ])
+        """Get precise object boundaries using SAM2
+        Args:
+            image: RGB numpy array (HxWx3)
+            boxes: List of [x1, y1, x2, y2] bounding boxes
+        Returns:
+            refined_boxes: List of refined bounding boxes
+            masks: List of binary masks
+            scores: List of confidence scores for each mask
+        """
+        try:
+            # Input validation
+            if not isinstance(image, np.ndarray):
+                raise ValueError(f"Expected numpy array, got {type(image)}")
             
-            # Get SAM prediction
-            sam_masks, _, _ = self.sam_predictor.predict(
-                box=input_box,
-                multimask_output=False
-            )
+            # Convert image format if needed
+            if isinstance(image, torch.Tensor):
+                image = (image.cpu().numpy() * 255).astype(np.uint8).transpose(1, 2, 0)
             
-            if sam_masks.shape[0] > 0:
-                mask = sam_masks[0]
-                y_indices, x_indices = np.where(mask > 0.5)
-                if len(y_indices) > 0 and len(x_indices) > 0:
-                    x_min, x_max = x_indices.min(), x_indices.max()
-                    y_min, y_max = y_indices.min(), y_indices.max()
-                    refined_boxes.append([x_min, y_min, x_max, y_max])
-                    masks.append(mask)
-        
-        return refined_boxes, masks
+            # Initialize SAM predictor with image
+            self.sam_predictor.set_image(image)
+            
+            refined_boxes = []
+            masks = []
+            scores = []
+            
+            # Process each bounding box
+            for box in boxes:
+                try:
+                    # Convert box to input format for SAM
+                    input_box = np.array([[box[0], box[1], box[2], box[3]]])
+                    
+                    # Get multiple mask predictions
+                    sam_masks, mask_scores, logits = self.sam_predictor.predict(
+                        box=input_box,
+                        multimask_output=True,  # Enable multiple mask output
+                        return_logits=True      # Get prediction logits for confidence
+                    )
+                    
+                    if sam_masks.shape[0] > 0:
+                        # Select best mask based on scores
+                        best_mask_idx = np.argmax(mask_scores)
+                        mask = sam_masks[best_mask_idx]
+                        score = mask_scores[best_mask_idx]
+                        
+                        # Refine mask using CRF if enabled
+                        if hasattr(self, 'use_crf') and self.use_crf:
+                            mask = self._refine_mask_with_crf(image, mask)
+                        
+                        # Get precise boundaries from mask
+                        y_indices, x_indices = np.where(mask > 0.5)
+                        if len(y_indices) > 0 and len(x_indices) > 0:
+                            # Calculate refined bounding box
+                            x_min, x_max = x_indices.min(), x_indices.max()
+                            y_min, y_max = y_indices.min(), y_indices.max()
+                            
+                            # Add padding for safety
+                            padding = 5
+                            x_min = max(0, x_min - padding)
+                            y_min = max(0, y_min - padding)
+                            x_max = min(image.shape[1], x_max + padding)
+                            y_max = min(image.shape[0], y_max + padding)
+                            
+                            refined_box = [x_min, y_min, x_max, y_max]
+                            
+                            # Calculate mask quality metrics
+                            mask_quality = self._calculate_mask_quality(mask, logits[best_mask_idx])
+                            
+                            # Only add high-quality detections
+                            if mask_quality > 0.5:
+                                refined_boxes.append(refined_box)
+                                masks.append(mask)
+                                scores.append(score.item())
+                                
+                                # Log successful refinement
+                                logger.debug(f"Refined box: {refined_box}, quality: {mask_quality:.2f}")
+                
+                except Exception as e:
+                    logger.error(f"Error processing box {box}: {str(e)}")
+                    continue
+            
+            logger.info(f"SAM processing complete: {len(refined_boxes)} refined boxes")
+            return refined_boxes, masks, scores
+
+        except Exception as e:
+            logger.error(f"Error in get_precise_boundaries: {str(e)}")
+            return [], [], []
+
+    def _calculate_mask_quality(self, mask, logits):
+        """Calculate quality metrics for a mask
+        Args:
+            mask: Binary mask array
+            logits: Raw prediction logits
+        Returns:
+            quality_score: Float between 0 and 1
+        """
+        try:
+            # Calculate mask statistics
+            mask_area = mask.sum()
+            total_area = mask.size
+            coverage = mask_area / total_area
+            
+            # Calculate boundary smoothness
+            boundaries = cv2.findContours(
+                mask.astype(np.uint8), 
+                cv2.RETR_EXTERNAL, 
+                cv2.CHAIN_APPROX_SIMPLE
+            )[0]
+            
+            if len(boundaries) > 0:
+                perimeter = cv2.arcLength(boundaries[0], True)
+                area = cv2.contourArea(boundaries[0])
+                smoothness = 4 * np.pi * area / (perimeter * perimeter) if perimeter > 0 else 0
+            else:
+                smoothness = 0
+            
+            # Calculate confidence from logits
+            confidence = torch.sigmoid(torch.from_numpy(logits)).mean().item()
+            
+            # Combine metrics
+            quality_score = (smoothness * 0.4 + confidence * 0.6)
+            
+            return quality_score
+            
+        except Exception as e:
+            logger.error(f"Error calculating mask quality: {str(e)}")
+            return 0.0
+
+    def _refine_mask_with_crf(self, image, mask):
+        """Refine mask using Conditional Random Fields
+        Args:
+            image: RGB image array
+            mask: Binary mask array
+        Returns:
+            refined_mask: Refined binary mask
+        """
+        try:
+            import pydensecrf.densecrf as dcrf
+            from pydensecrf.utils import unary_from_labels
+            
+            # Convert inputs
+            mask = mask.astype(np.uint8)
+            h, w = mask.shape
+            
+            # Create CRF
+            d = dcrf.DenseCRF2D(w, h, 2)  # 2 classes: fg/bg
+            
+            # Set unary potentials
+            U = unary_from_labels(mask[np.newaxis], 2, gt_prob=0.7, zero_unsure=False)
+            d.setUnaryEnergy(U)
+            
+            # Set pairwise potentials
+            d.addPairwiseGaussian(sxy=3, compat=3)
+            d.addPairwiseBilateral(sxy=80, srgb=13, rgbim=image, compat=10)
+            
+            # Inference
+            Q = d.inference(5)
+            refined_mask = np.argmax(Q, axis=0).reshape((h, w))
+            
+            return refined_mask.astype(bool)
+            
+        except Exception as e:
+            logger.error(f"Error in CRF refinement: {str(e)}")
+            return mask
 
     def _apply_constraints(self, dimensions, object_type):
         """Apply realistic constraints to object dimensions"""
@@ -478,11 +601,13 @@ class EnhancedFurnitureDetector:
         
         return points_2d, points_3d
 
-    def detect_and_measure(self, image):
+    def detect_and_measure(self, image, lidar_points=None, tof_data=None):
         """
-        Enhanced detection and measurement using all available models
+        Enhanced detection and measurement using all available models and sensors
         Args:
             image: RGB numpy array (HxWx3)
+            lidar_points: Optional LiDAR point cloud data
+            tof_data: Optional ToF sensor data
         """
         try:
             # Input validation and logging
@@ -495,26 +620,36 @@ class EnhancedFurnitureDetector:
             camera_matrix, dist_coeffs, fov = self.camera_calibrator.calibrate_from_image(image)
             logger.info(f"Camera calibration complete: FOV={fov:.1f}°")
             
-            # 2. Object Detection
+            # 2. Get depth data from available sensors
+            depth_map = self.get_depth_data(image, lidar_points, tof_data)
+            
+            # 3. Object Detection
             boxes, scores, labels = self.detect_objects(image)
             logger.info(f"Object detection complete: found {len(boxes)} objects")
             
+            # 4. Get precise boundaries using SAM2
+            refined_boxes, masks, mask_scores = self.get_precise_boundaries(image, boxes)
+            
             # Process detections
             detections = []
-            for box, score, label in zip(boxes, scores, labels):
+            for box, score, label, mask, mask_score in zip(refined_boxes, scores, labels, masks, mask_scores):
                 try:
-                    # Calculate dimensions
+                    # Calculate dimensions using depth information
                     dims = self._calculate_object_dimensions(
                         box, 
                         camera_matrix[0,0],  # focal length 
-                        label.lower()
+                        label.lower(),
+                        depth_map=depth_map,
+                        mask=mask
                     )
                     
                     detections.append({
                         'type': label,
-                        'confidence': round(float(score), 2),
+                        'confidence': round(float(score * mask_score), 2),  # Combine detection and mask confidence
                         'dimensions': dims,
-                        'bounding_box': [float(x) for x in box]
+                        'bounding_box': [float(x) for x in box],
+                        'lidar_enhanced': lidar_points is not None,
+                        'tof_enhanced': tof_data is not None
                     })
                     
                 except Exception as e:
@@ -528,28 +663,38 @@ class EnhancedFurnitureDetector:
             logger.error(f"Error in detect_and_measure: {str(e)}")
             raise
 
-    def _calculate_object_dimensions(self, box, focal_length, object_type):
-        """Calculate real-world dimensions using camera parameters"""
+    def _calculate_object_dimensions(self, box, focal_length, object_type, depth_map=None, mask=None):
+        """Calculate real-world dimensions using camera parameters and depth data"""
         try:
             # Get pixel dimensions
             pixel_width = box[2] - box[0]
             pixel_height = box[3] - box[1]
             
-            # Get standard dimensions for this type
-            standard_dims = self.STANDARD_DIMENSIONS.get(
-                object_type, 
-                self.STANDARD_DIMENSIONS['default']
-            )
+            # Get depth at object location
+            if depth_map is not None and mask is not None:
+                # Use masked mean depth for more accurate measurement
+                object_depth = depth_map[mask].mean()
+            else:
+                # Fall back to standard dimensions
+                standard_dims = self.STANDARD_DIMENSIONS.get(
+                    object_type, 
+                    self.STANDARD_DIMENSIONS['default']
+                )
+                return standard_dims
             
-            # Use standard dimensions as a reference
+            # Calculate real-world dimensions using depth
+            width = (pixel_width * object_depth) / focal_length
+            height = (pixel_height * object_depth) / focal_length
+            depth = width * self.DEPTH_RATIOS.get(object_type, self.DEPTH_RATIOS['default'])
+            
+            # Apply constraints
             dims = {
-                'length': round(standard_dims['width'], 1),
-                'width': round(standard_dims['depth'], 1),
-                'height': round(standard_dims['height'], 1)
+                'length': round(width, 1),
+                'width': round(depth, 1),
+                'height': round(height, 1)
             }
             
-            logger.debug(f"Calculated dimensions for {object_type}: {dims}")
-            return dims
+            return self._apply_constraints(dims, object_type)
             
         except Exception as e:
             logger.error(f"Error calculating dimensions: {str(e)}")
