@@ -123,7 +123,7 @@ class EnhancedFurnitureDetector:
             self.model.conf = 0.45  # Increased from 0.25
             self.model.iou = 0.35   # Decreased from 0.45 to better handle overlapping objects
             self.model.imgsz = 640  # Image size
-            self.model.classes = [0, 56, 57, 58, 59, 60, 61, 62, 63, 64, 65, 66, 67]
+            self.model.classes = [56, 57, 58, 59, 60, 61, 62, 63, 64, 65, 66, 67]  # Furniture classes only
             
             # Updated dimensions for better accuracy
             self.STANDARD_DIMENSIONS = {
@@ -134,13 +134,29 @@ class EnhancedFurnitureDetector:
                 'desk': {'width': 60, 'depth': 30, 'height': 30},
                 'tv': {'width': 48, 'depth': 4, 'height': 27},
                 'book': {'width': 6, 'depth': 9, 'height': 1},
-                'person': {'width': 24, 'depth': 12, 'height': 70},
+                'microwave': {'width': 24, 'depth': 19, 'height': 13},  # Standard microwave dimensions
                 'default': {'width': 30, 'depth': 30, 'height': 30}
             }
             
             # Device configuration
             self.device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
             logger.info(f"Using device: {self.device}")
+            
+            # Initialize knowledge base
+            self.sentence_model = SentenceTransformer('all-MiniLM-L6-v2')
+            self.index = faiss.IndexFlatL2(384)  # 384 is the embedding dimension
+            self.create_knowledge_base()
+            self.add_knowledge_to_index()
+            
+            # Type-specific confidence thresholds
+            self.CONFIDENCE_THRESHOLDS = {
+                'tv': 0.6,
+                'person': 0.7,
+                'chair': 0.5,
+                'couch': 0.5,
+                'microwave': 0.6,
+                'default': 0.45
+            }
             
         except Exception as e:
             logger.error(f"Error initializing detector: {str(e)}")
@@ -741,3 +757,157 @@ class EnhancedFurnitureDetector:
             final_detections.extend(selected)
         
         return final_detections
+
+    def validate_video(self, video_path):
+        """Validate video file before processing"""
+        try:
+            cap = cv2.VideoCapture(video_path)
+            if not cap.isOpened():
+                raise ValueError("Could not open video file")
+            
+            # Check video properties
+            fps = cap.get(cv2.CAP_PROP_FPS)
+            frame_count = cap.get(cv2.CAP_PROP_FRAME_COUNT)
+            duration = frame_count / fps
+            
+            if duration > 60:  # Limit to 1 minute
+                raise ValueError("Video too long (max 1 minute)")
+            
+            return True
+            
+        except Exception as e:
+            logger.error(f"Video validation failed: {str(e)}")
+            return False
+
+    def calculate_room_dimensions(self, detections):
+        """Calculate room dimensions based on furniture detections"""
+        try:
+            # Get largest furniture dimensions as reference
+            max_length = max(d['dimensions']['length'] for d in detections)
+            max_width = max(d['dimensions']['width'] for d in detections)
+            max_height = max(d['dimensions']['height'] for d in detections)
+            
+            # Add padding for walls and movement space
+            room_length = max_length * 1.5  # 50% extra space
+            room_width = max_width * 1.5
+            room_height = max_height + 12  # Just add 1 foot for ceiling
+            
+            # Calculate volume
+            volume = (room_length * room_width * room_height) / 1728  # Convert to cubic feet
+            
+            # Round all values
+            return {
+                'length': round(room_length, 1),
+                'width': round(room_width, 1),
+                'height': round(room_height, 1),
+                'volume': round(volume, 2)
+            }
+        except Exception as e:
+            logger.error(f"Error calculating room dimensions: {str(e)}")
+            return None
+
+    def calculate_furniture_volume(self, dimensions):
+        """Calculate furniture volume in cubic feet"""
+        try:
+            volume = (
+                dimensions['length'] * 
+                dimensions['width'] * 
+                dimensions['height']
+            ) / 1728  # Convert cubic inches to cubic feet
+            return round(volume, 2)
+        except Exception as e:
+            logger.error(f"Error calculating volume: {str(e)}")
+            return 0
+
+    def summarize_detections(self, detections):
+        """Create a summary of room contents"""
+        try:
+            summary = {
+                'furniture_count': len(detections),
+                'furniture_types': {},
+                'total_volume': 0,
+                'largest_items': []
+            }
+            
+            for det in detections:
+                # Count furniture types
+                ftype = det['type'].lower()
+                summary['furniture_types'][ftype] = summary['furniture_types'].get(ftype, 0) + 1
+                
+                # Add volume
+                volume = self.calculate_furniture_volume(det['dimensions'])
+                summary['total_volume'] += volume
+                
+                # Track largest items
+                if len(summary['largest_items']) < 3:
+                    summary['largest_items'].append(det)
+                    summary['largest_items'].sort(key=lambda x: self.calculate_furniture_volume(x['dimensions']), reverse=True)
+            
+            return summary
+        except Exception as e:
+            logger.error(f"Error creating summary: {str(e)}")
+            return None
+
+    def _process_detections(self, detections):
+        """Process detections with furniture-only filter"""
+        try:
+            # Filter out people
+            furniture_only = [
+                det for det in detections 
+                if det['type'].lower() != 'person'
+            ]
+            
+            # Group by object type
+            grouped = {}
+            for det in furniture_only:
+                obj_type = det['type'].lower()
+                if obj_type not in grouped:
+                    grouped[obj_type] = []
+                grouped[obj_type].append(det)
+            
+            final_detections = []
+            
+            # Process each furniture group
+            for obj_type, group in grouped.items():
+                # Sort by confidence
+                group.sort(key=lambda x: x['confidence'], reverse=True)
+                
+                # Apply type-specific filtering
+                if obj_type in ['tv', 'microwave']:
+                    # Usually only one TV/microwave per wall
+                    final_detections.append(group[0])
+                else:
+                    # Standard filtering for furniture
+                    selected = self._filter_overlapping(group, iou_threshold=0.5)
+                    final_detections.extend(selected)
+            
+            return final_detections
+            
+        except Exception as e:
+            logger.error(f"Error processing detections: {str(e)}")
+            return []
+
+    def _filter_overlapping(self, detections, iou_threshold=0.5):
+        """Filter overlapping detections"""
+        selected = []
+        for det in detections:
+            is_duplicate = False
+            for sel in selected:
+                if self._calculate_iou(det['bounding_box'], sel['bounding_box']) > iou_threshold:
+                    is_duplicate = True
+                    break
+            if not is_duplicate:
+                selected.append(det)
+        return selected
+
+class ValidationError(Exception):
+    pass
+
+def validate_scan(self, detections):
+    """Validate scan quality"""
+    if len(detections) < 2:
+        raise ValidationError("Too few items detected. Please scan again.")
+    
+    confidence_scores = [d['confidence'] for d in detections]
+    if sum(confidence_scores) / len(confidence_scores) < 0.5:
+        raise ValidationError("Low confidence detections. Please scan in better lighting.")

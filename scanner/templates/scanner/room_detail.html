@@ -76,5 +76,28 @@
             </div>
         </div>
     </div>
+
+    <!-- Add scanning instructions -->
+    <div class="scanning-instructions">
+        <h3>How to Scan Your Room</h3>
+        <ol>
+            <li>Stand in the center of your room</li>
+            <li>Slowly pan your camera around the room</li>
+            <li>Try to capture all furniture items</li>
+            <li>Keep the camera steady</li>
+        </ol>
+    </div>
+
+    <!-- Add summary section -->
+    <div class="room-summary">
+        <h3>Room Summary</h3>
+        <div class="furniture-count">Total Items: {{ summary.furniture_count }}</div>
+        <div class="total-volume">Total Furniture Volume: {{ summary.total_volume }} cu ft</div>
+        <div class="furniture-types">
+            {% for type, count in summary.furniture_types.items %}
+                <div>{{ type }}: {{ count }}</div>
+            {% endfor %}
+        </div>
+    </div>
 </div>
 {% endblock %}

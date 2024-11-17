@@ -18,6 +18,8 @@ import io
 import os
 import uuid
 from django.views.decorators.http import require_http_methods
+from channels.layers import get_channel_layer
+from asgiref.sync import async_to_sync
 
 # Initialize the detector
 detector = EnhancedFurnitureDetector()
@@ -295,14 +297,71 @@ def process_video(request):
         detector = EnhancedFurnitureDetector()
         detections = detector.process_video(temp_path)
         
+        # Calculate room dimensions
+        room_dims = detector.calculate_room_dimensions(detections)
+        
+        # Create summary
+        summary = detector.summarize_detections(detections)
+        
+        # Update room
+        room = Room.objects.get(id=room_id)
+        room.update_dimensions(room_dims)
+        
         # Clean up
         os.remove(temp_path)
         
+        # Send progress updates
+        channel_layer = get_channel_layer()
+        async_to_sync(channel_layer.group_send)(
+            f"room_{room_id}",
+            {
+                "type": "processing_update",
+                "progress": progress
+            }
+        )
+        
         return JsonResponse({
             'success': True,
-            'detections': detections
+            'detections': detections,
+            'room_dimensions': room_dims,
+            'summary': summary
         })
         
     except Exception as e:
         logger.error(f"Error processing video: {str(e)}")
         return JsonResponse({'error': str(e)}, status=500)
+
+@login_required
+def scan_room_video(request, room_id):
+    """Video scanning interface."""
+    room = get_object_or_404(Room, id=room_id, user=request.user)
+    context = {
+        'room': room,
+        'recent_detections': FurnitureDetection.objects.filter(room=room).order_by('-timestamp')[:5]
+    }
+    return render(request, 'scanner/scan_video.html', context)
+
+@login_required
+def export_room_data(request, room_id):
+    """Export room data as PDF or CSV"""
+    room = get_object_or_404(Room, id=room_id, user=request.user)
+    detections = FurnitureDetection.objects.filter(room=room)
+    
+    if request.GET.get('format') == 'pdf':
+        # Generate PDF report
+        response = generate_pdf_report(room, detections)
+    else:
+        # Generate CSV
+        response = generate_csv_report(room, detections)
+    
+    return response
+
+@login_required
+def compare_rooms(request):
+    """Compare dimensions and contents of different rooms"""
+    rooms = Room.objects.filter(user=request.user)
+    context = {
+        'rooms': rooms,
+        'comparisons': calculate_room_comparisons(rooms)
+    }
+    return render(request, 'scanner/compare_rooms.html', context)

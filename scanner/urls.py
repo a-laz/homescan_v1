@@ -10,4 +10,6 @@ urlpatterns = [
     path('room/add/', views.add_room, name='add_room'),
     path('room/<int:room_id>/edit/', views.edit_room, name='edit_room'),
     path('api/process-frame/', views.process_frame, name='process_frame'),
+    path('room/<int:room_id>/scan-video/', views.scan_room_video, name='scan_room_video'),
+    path('api/process-video/', views.process_video, name='process_video'),
 ]

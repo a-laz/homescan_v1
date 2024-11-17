@@ -1,0 +1,61 @@
+{% extends 'base.html' %}
+
+{% block content %}
+<div class="container">
+    <h2>Scan Room: {{ room.name }}</h2>
+    
+    <div class="upload-section">
+        <form id="videoUploadForm" enctype="multipart/form-data">
+            {% csrf_token %}
+            <input type="file" name="video" accept="video/*" capture="environment">
+            <button type="submit" class="btn btn-primary">Process Video</button>
+        </form>
+        <div id="progressBar" style="display: none;">
+            <div class="progress"></div>
+        </div>
+    </div>
+
+    <div id="results" style="display: none;">
+        <h3>Detected Furniture</h3>
+        <div id="detectionsList"></div>
+    </div>
+</div>
+
+<script>
+document.getElementById('videoUploadForm').onsubmit = async (e) => {
+    e.preventDefault();
+    const form = e.target;
+    const data = new FormData(form);
+    
+    try {
+        const response = await fetch('/api/process-video/', {
+            method: 'POST',
+            body: data
+        });
+        
+        const result = await response.json();
+        if (result.success) {
+            displayResults(result.detections);
+        } else {
+            alert('Error processing video: ' + result.error);
+        }
+    } catch (error) {
+        console.error('Error:', error);
+        alert('Error uploading video');
+    }
+};
+
+function displayResults(detections) {
+    const resultsList = document.getElementById('detectionsList');
+    resultsList.innerHTML = detections.map(det => `
+        <div class="detection-item">
+            <h4>${det.type}</h4>
+            <p>Dimensions: ${det.dimensions.length}"x${det.dimensions.width}"x${det.dimensions.height}"</p>
+            <p>Confidence: ${det.confidence}</p>
+        </div>
+    `).join('');
+    
+    document.getElementById('results').style.display = 'block';
+}
+</script>
+{% endblock %}
