@@ -3,15 +3,15 @@
 ## High Priority Features
 
 ### Depth-Anything-V2 Integration
-- [ ] Integrate Depth-Anything-V2 for improved depth estimation
-  - [ ] Setup and model initialization
-    - [ ] Download model checkpoints
-    - [ ] Configure for CPU/MPS/GPU
-    - [ ] Handle model loading errors
-  - [ ] Implementation
-    - [ ] Update depth estimation pipeline
-    - [ ] Add fallback mechanisms
-    - [ ] Optimize for real-time use
+- [x] Integrate Depth-Anything-V2 for improved depth estimation
+  - [x] Setup and model initialization
+    - [x] Download model checkpoints
+    - [x] Configure for CPU/MPS/GPU
+    - [x] Handle model loading errors
+  - [x] Implementation
+    - [x] Update depth estimation pipeline
+    - [x] Add fallback mechanisms
+    - [x] Optimize for real-time use
   - [ ] Testing and validation
     - [ ] Compare with current depth estimation
     - [ ] Benchmark performance

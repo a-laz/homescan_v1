@@ -13,3 +13,5 @@ yolov5x.pt
 sam_vit_l_0b3195.pth
 yolov8x.pt
 yolov8n.pt
+*.log
+.VSCodeCounter/

@@ -2,6 +2,7 @@
 import os
 from pathlib import Path
 import multiprocessing
+import torch
 
 # Build paths inside the project like this: BASE_DIR / 'subdir'.
 BASE_DIR = Path(__file__).resolve().parent.parent
@@ -131,7 +132,7 @@ ALLOWED_HOSTS = [
     'localhost',
     '127.0.0.1',
     # Change this to the IP address of the machine running the server
-    '192.168.1.113',
+    '192.168.1.226',
     'x',
 ]
 
@@ -144,7 +145,7 @@ CORS_ALLOWED_ORIGINS = [
     "https://localhost:8000",
     "https://127.0.0.1:8000",
     # Change this to the IP address of the machine running the server
-    "https://192.168.1.113:8000",
+    "https://192.168.1.226:8000",
 ]
 CORS_ALLOW_CREDENTIALS = True
 
@@ -175,7 +176,8 @@ ML_SETTINGS = {
     'MODEL_PATH': os.path.join(BASE_DIR, 'ml_models'),
     'DETECTION_THRESHOLD': 0.5,
     'MAX_DETECTIONS': 10,
-    'DEVICE': 'cpu',
+    'DEVICE': 'cuda' if torch.cuda.is_available() else 'cpu',
+    'BATCH_SIZE': 4 if torch.cuda.is_available() else 1,
 }
 
 # Set multiprocessing start method

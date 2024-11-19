@@ -15,6 +15,7 @@ from io import BytesIO
 from segment_anything import sam_model_registry, SamPredictor
 from ultralytics import YOLO
 import os
+from transformers import pipeline
 
 # Set up logging
 logging.basicConfig(level=logging.INFO)
@@ -22,6 +23,13 @@ logger = logging.getLogger(__name__)
 
 # Set environment variable for tokenizers
 os.environ["TOKENIZERS_PARALLELISM"] = "false"
+
+# Make depth-anything import optional
+try:
+    DEPTH_ANYTHING_AVAILABLE = True
+except ImportError:
+    DEPTH_ANYTHING_AVAILABLE = False
+    logger.warning("transformers package not found. Using fallback depth estimation.")
 
 class CameraCalibrator:
     def __init__(self):
@@ -113,52 +121,40 @@ class EnhancedFurnitureDetector:
         try:
             logger.info("Initializing EnhancedFurnitureDetector...")
             
-            # Initialize camera calibrator
-            self.camera_calibrator = CameraCalibrator()
+            # GPU Diagnostics and Setup
+            logger.info(f"CUDA available: {torch.cuda.is_available()}")
+            logger.info(f"CUDA version: {torch.version.cuda}")
             
-            # Initialize YOLO with proper model and version
-            try:
-                logger.info("Loading YOLO model...")
-                self.model = YOLO('yolov8n.pt')  # Using smaller model for testing
-                logger.info("YOLO model loaded successfully")
-            except Exception as yolo_error:
-                logger.error(f"Error loading YOLO model: {str(yolo_error)}")
-                raise
+            if torch.cuda.is_available():
+                logger.info(f"CUDA device count: {torch.cuda.device_count()}")
+                logger.info(f"CUDA device name: {torch.cuda.get_device_name(0)}")
+                torch.cuda.set_device(0)  # Use first GPU
+                # Enable CUDA optimizations
+                torch.backends.cudnn.benchmark = True
+                torch.backends.cudnn.enabled = True
+                
+            # Set device explicitly
+            self.device = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
+            logger.info(f"Using device: {self.device}")
             
-            # Initialize MiDaS for depth estimation
-            self.device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
-            
-            # Load MiDaS model and transforms
-            model_type = "DPT_Large"
-            self.depth_model = torch.hub.load("intel-isl/MiDaS", model_type)
-            self.depth_model.to(self.device)
-            self.depth_model.eval()
-            
-            # Load MiDaS transforms
-            midas_transforms = torch.hub.load("intel-isl/MiDaS", "transforms")
-            if model_type == "DPT_Large" or model_type == "DPT_Hybrid":
-                self.depth_transforms = midas_transforms.dpt_transform
+            # Initialize Depth-Anything-V2 through transformers
+            if DEPTH_ANYTHING_AVAILABLE:
+                logger.info("Loading Depth-Anything-V2 model...")
+                try:
+                    self.depth_pipeline = pipeline(
+                        task="depth-estimation",
+                        model="depth-anything/Depth-Anything-V2-Small-hf",
+                        device=0 if torch.cuda.is_available() else -1
+                    )
+                    logger.info("Depth-Anything-V2 model loaded successfully")
+                except Exception as depth_error:
+                    logger.error(f"Error loading Depth-Anything-V2: {str(depth_error)}")
+                    self.depth_pipeline = None
             else:
-                self.depth_transforms = midas_transforms.small_transform
-            
-            # Initialize SAM
-            logger.info("Loading SAM model...")
-            sam_checkpoint = "sam_vit_l_0b3195.pth"  # Updated to your model path
-            model_type = "vit_l"  # Changed to vit_l for the large model
-            
-            try:
-                self.sam = sam_model_registry[model_type](checkpoint=sam_checkpoint)
-                self.sam.to(device=self.device)
-                self.sam_predictor = SamPredictor(self.sam)
-                logger.info("SAM model loaded successfully")
-            except Exception as sam_error:
-                logger.error(f"Error loading SAM model: {str(sam_error)}")
-                raise
-            
-            # Rest of initialization...
-            
+                self.depth_pipeline = None
+                
         except Exception as e:
-            logger.error(f"Error initializing detector: {str(e)}")
+            logger.error(f"Error in initialization: {str(e)}")
             raise
 
     def create_knowledge_base(self):
@@ -207,61 +203,54 @@ class EnhancedFurnitureDetector:
         return " ".join(relevant_info)
 
     def detect_objects(self, image):
-        """Detect objects using YOLOv8 with improved filtering"""
+        """Detect objects using YOLOv8 with GPU acceleration"""
         try:
-            # Debug input
-            logger.info(f"Object detection input shape: {image.shape}, dtype: {image.dtype}")
+            logger.info(f"Running detection on device: {self.device}")
             
-            # Run inference with specific parameters
-            results = self.model(
-                image,
-                conf=0.25,  # Confidence threshold
-                iou=0.45,   # NMS IoU threshold
-                classes=None,  # All classes
-                verbose=False
-            )
+            # Ensure image is on GPU if CUDA is available
+            if torch.cuda.is_available():
+                with torch.cuda.amp.autocast():  # Enable automatic mixed precision
+                    results = self.model(
+                        image,
+                        conf=0.3,
+                        iou=0.4,
+                        classes=None,
+                        agnostic=True,
+                        max_det=50,
+                        verbose=False,
+                        device=self.device
+                    )
+            else:
+                results = self.model(
+                    image,
+                    conf=0.3,
+                    iou=0.4,
+                    classes=None,
+                    agnostic=True,
+                    max_det=50,
+                    verbose=False
+                )
             
-            # Process results with better filtering
-            boxes = []
-            scores = []
-            labels = []
-            
-            # Track detected objects for duplicate filtering
-            detected_objects = {}
-            
-            for result in results:
-                if len(result.boxes) > 0:
-                    for box in result.boxes:
-                        if box.conf.item() > 0.25:  # Additional confidence check
-                            label = result.names[int(box.cls)]
-                            score = box.conf.item()
-                            bbox = box.xyxy[0].tolist()
-                            
-                            # Filter duplicates based on IoU and class
-                            is_duplicate = False
-                            for existing_label, existing_boxes in detected_objects.items():
-                                if existing_label == label:
-                                    for existing_box in existing_boxes:
-                                        if self._calculate_iou(bbox, existing_box) > 0.5:
-                                            is_duplicate = True
-                                            break
-                            
-                            if not is_duplicate:
-                                boxes.append(bbox)
-                                scores.append(score)
-                                labels.append(label)
-                                
-                                # Track this detection
-                                if label not in detected_objects:
-                                    detected_objects[label] = []
-                                detected_objects[label].append(bbox)
-            
-            logger.info(f"Detection complete: found {len(boxes)} unique objects")
-            return boxes, scores, labels
-
+            # Process results
+            if len(results) > 0:
+                # Move results to CPU for numpy conversion
+                boxes = results[0].boxes.xyxy.cpu().numpy()
+                scores = results[0].boxes.conf.cpu().numpy()
+                labels = [results[0].names[int(c)] for c in results[0].boxes.cls.cpu().numpy()]
+                
+                logger.info(f"Detected {len(boxes)} objects")
+                return boxes, scores, labels
+                
+            return [], [], []
+                
         except Exception as e:
             logger.error(f"Error in detect_objects: {str(e)}")
             return [], [], []
+
+        finally:
+            # Clear GPU cache after processing
+            if torch.cuda.is_available():
+                torch.cuda.empty_cache()
 
     def _calculate_iou(self, box1, box2):
         """Calculate IoU between two boxes"""
@@ -277,49 +266,59 @@ class EnhancedFurnitureDetector:
         return intersection / (area1 + area2 - intersection)
 
     def estimate_depth(self, image):
-        """
-        Estimate depth using MiDaS
+        """Estimate depth using Depth-Anything-V2 with fallback
         Args:
             image: RGB numpy array (HxWx3)
         Returns:
             depth_map: numpy array of depth values
         """
         try:
-            # Debug input
-            logger.info(f"Depth estimation input shape: {image.shape}, dtype: {image.dtype}")
-            
-            # Ensure we have a numpy array
+            # Validate input
             if not isinstance(image, np.ndarray):
                 raise ValueError(f"Expected numpy array, got {type(image)}")
             
-            # Transform the image
-            input_batch = self.depth_transforms(image).to(self.device)
-            
-            # Add batch dimension if needed
-            if len(input_batch.shape) == 3:
-                input_batch = input_batch.unsqueeze(0)
-            
-            # Disable gradients for inference
-            with torch.no_grad():
-                prediction = self.depth_model(input_batch)
+            # Use Depth-Anything-V2 if available
+            if self.depth_pipeline is not None:
+                # Convert numpy array to PIL Image
+                pil_image = Image.fromarray(cv2.cvtColor(image, cv2.COLOR_BGR2RGB))
                 
-                # Interpolate to original size
-                prediction = torch.nn.functional.interpolate(
-                    prediction.unsqueeze(1),
-                    size=image.shape[:2],
-                    mode="bicubic",
-                    align_corners=False,
-                ).squeeze()
+                # Get depth prediction
+                depth_output = self.depth_pipeline(pil_image)
+                depth_map = np.array(depth_output["depth"])
                 
-                # Convert to numpy and normalize
-                depth_map = prediction.cpu().numpy()
+                # Normalize depth map
                 depth_map = cv2.normalize(depth_map, None, 0, 1, cv2.NORM_MINMAX)
                 
+                logger.info("Depth estimation completed using Depth-Anything-V2")
                 return depth_map
-
+            
+            # Fallback to basic depth estimation
+            logger.warning("Using basic depth estimation method")
+            return self._basic_depth_estimation(image)
+            
         except Exception as e:
             logger.error(f"Error in depth estimation: {str(e)}")
-            # Return uniform depth map as fallback
+            return np.ones(image.shape[:2], dtype=np.float32) * 0.5
+
+    def _basic_depth_estimation(self, image):
+        """Basic depth estimation fallback method"""
+        try:
+            # Convert to grayscale
+            gray = cv2.cvtColor(image, cv2.COLOR_RGB2GRAY)
+            
+            # Apply Gaussian blur
+            blurred = cv2.GaussianBlur(gray, (9, 9), 0)
+            
+            # Use edge detection as a simple depth cue
+            edges = cv2.Sobel(blurred, cv2.CV_64F, 1, 1, ksize=3)
+            
+            # Normalize to 0-1 range
+            depth_map = cv2.normalize(edges, None, 0, 1, cv2.NORM_MINMAX)
+            
+            return depth_map.astype(np.float32)
+            
+        except Exception as e:
+            logger.error(f"Error in basic depth estimation: {str(e)}")
             return np.ones(image.shape[:2], dtype=np.float32) * 0.5
 
     def get_precise_boundaries(self, image, boxes):
@@ -770,10 +769,14 @@ class EnhancedFurnitureDetector:
             if output_path:
                 fourcc = cv2.VideoWriter_fourcc(*'mp4v')
                 out = cv2.VideoWriter(output_path, fourcc, fps, (frame_width, frame_height))
-            
             # Track detections across frames
             all_detections = []
             frame_count = 0
+            
+            # Process in batches for GPU efficiency
+            batch_size = 4 if torch.cuda.is_available() else 1
+            frames_batch = []
+            batch_indices = []
             
             while cap.isOpened():
                 ret, frame = cap.read()
@@ -781,60 +784,72 @@ class EnhancedFurnitureDetector:
                     break
                     
                 frame_count += 1
-                if frame_count % 5 != 0:  # Process every 5th frame to improve speed
+                if frame_count % 5 != 0:  # Process every 5th frame
                     continue
                 
-                # Process frame
-                try:
-                    # Convert BGR to RGB
-                    frame_rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
-                    
-                    # Get detections
-                    boxes, scores, labels = self.detect_objects(frame_rgb)
-                    
-                    # Process detections
-                    frame_detections = []
-                    for box, score, label in zip(boxes, scores, labels):
-                        try:
-                            # Calculate dimensions
-                            dims = self._calculate_object_dimensions(
-                                box, 
-                                self.camera_calibrator.get_default_calibration(frame.shape)[0][0,0],
-                                label.lower()
-                            )
+                # Convert BGR to RGB
+                frame_rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+                frames_batch.append(frame_rgb)
+                batch_indices.append(frame_count)
+                
+                # Process batch
+                if len(frames_batch) == batch_size:
+                    try:
+                        # Process batch on GPU
+                        with torch.cuda.amp.autocast() if torch.cuda.is_available() else nullcontext():
+                            results = self.model(frames_batch, device=self.device)
+                        
+                        # Process results for each frame
+                        for idx, result in enumerate(results):
+                            frame_detections = []
+                            boxes = result.boxes.xyxy.cpu().numpy()
+                            scores = result.boxes.conf.cpu().numpy()
+                            labels = [result.names[int(c)] for c in result.boxes.cls.cpu().numpy()]
                             
-                            detection = {
-                                'frame': frame_count,
-                                'type': label,
-                                'confidence': round(float(score), 2),
-                                'dimensions': dims,
-                                'bounding_box': [float(x) for x in box]
-                            }
+                            for box, score, label in zip(boxes, scores, labels):
+                                try:
+                                    # Calculate dimensions
+                                    dims = self._calculate_object_dimensions(
+                                        box, 
+                                        self.camera_calibrator.get_default_calibration(frames_batch[idx].shape)[0][0,0],
+                                        label.lower()
+                                    )
+                                    
+                                    detection = {
+                                        'frame': batch_indices[idx],
+                                        'type': label,
+                                        'confidence': round(float(score), 2),
+                                        'dimensions': dims,
+                                        'bounding_box': [float(x) for x in box]
+                                    }
+                                    
+                                    frame_detections.append(detection)
+                                    
+                                    # Draw on frame if output requested
+                                    if output_path:
+                                        self._draw_detection(frames_batch[idx], detection)
+                                    
+                                except Exception as e:
+                                    logger.error(f"Error processing detection: {str(e)}")
+                                    continue
                             
-                            frame_detections.append(detection)
+                            # Store frame detections
+                            all_detections.extend(frame_detections)
                             
-                            # Draw on frame if output requested
+                            # Write frame if output requested
                             if output_path:
-                                self._draw_detection(frame, detection)
+                                out.write(frames_batch[idx])
+                        
+                        frames_batch = []
+                        batch_indices = []
+                        
+                        # Log progress
+                        if frame_count % 50 == 0:
+                            logger.info(f"Processed {frame_count}/{total_frames} frames")
                             
-                        except Exception as e:
-                            logger.error(f"Error processing detection: {str(e)}")
-                            continue
-                    
-                    # Store frame detections
-                    all_detections.extend(frame_detections)
-                    
-                    # Write frame if output requested
-                    if output_path:
-                        out.write(frame)
-                    
-                    # Log progress
-                    if frame_count % 50 == 0:
-                        logger.info(f"Processed {frame_count}/{total_frames} frames")
-                    
-                except Exception as e:
-                    logger.error(f"Error processing frame {frame_count}: {str(e)}")
-                    continue
+                    except Exception as e:
+                        logger.error(f"Error processing batch: {str(e)}")
+                        continue
             
             # Clean up
             cap.release()
@@ -1110,6 +1125,18 @@ class EnhancedFurnitureDetector:
         except Exception as e:
             logger.error(f"Error getting depth data: {str(e)}")
             return self.estimate_depth(image)  # Fall back to monocular estimation
+
+    def __del__(self):
+        """Cleanup GPU memory"""
+        try:
+            if hasattr(self, 'model'):
+                self.model.cpu()
+            if hasattr(self, 'sam'):
+                self.sam.cpu()
+            if torch.cuda.is_available():
+                torch.cuda.empty_cache()
+        except Exception as e:
+            logger.error(f"Error in cleanup: {str(e)}")
 
 class ValidationError(Exception):
     pass
