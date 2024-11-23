@@ -45,6 +45,7 @@
                             <table class="table">
                                 <thead>
                                     <tr>
+                                        <th>Image</th>
                                         <th>Type</th>
                                         <th>Dimensions</th>
                                         <th>Volume</th>
@@ -55,11 +56,27 @@
                                 <tbody>
                                     {% for detection in detections %}
                                     <tr>
-                                        <td>{{ detection.furniture_type }}</td>
                                         <td>
-                                            {{ detection.length }}″ × 
-                                            {{ detection.width }}″ × 
-                                            {{ detection.height }}″
+                                            {% if detection.image_data %}
+                                                <img src="{{ detection.get_image_url }}" 
+                                                     alt="{{ detection.furniture_type }}"
+                                                     class="detection-thumbnail"
+                                                     style="max-width: 100px; height: auto; cursor: pointer"
+                                                     onclick="showFullImage(this.src, '{{ detection.furniture_type }}')"
+                                                >
+                                            {% else %}
+                                                <span class="text-muted">No image</span>
+                                            {% endif %}
+                                        </td>
+                                        <td>{{ detection.furniture_type|title }}</td>
+                                        <td>
+                                            {% if detection.length > 0 or detection.width > 0 or detection.height > 0 %}
+                                                {{ detection.length|floatformat:1 }}" × 
+                                                {{ detection.width|floatformat:1 }}" × 
+                                                {{ detection.height|floatformat:1 }}"
+                                            {% else %}
+                                                Dimensions not available
+                                            {% endif %}
                                         </td>
                                         <td>{{ detection.volume|floatformat:2 }} cu ft</td>
                                         <td>{{ detection.confidence|floatformat:2 }}</td>
@@ -100,4 +117,44 @@
         </div>
     </div>
 </div>
+
+<!-- Add modal for full-size image -->
+<div class="modal fade" id="imageModal" tabindex="-1" aria-hidden="true">
+    <div class="modal-dialog modal-lg">
+        <div class="modal-content">
+            <div class="modal-header">
+                <h5 class="modal-title"></h5>
+                <button type="button" class="btn-close" data-bs-dismiss="modal" aria-label="Close"></button>
+            </div>
+            <div class="modal-body text-center">
+                <img src="" class="img-fluid" alt="Full size detection">
+            </div>
+        </div>
+    </div>
+</div>
+
+<!-- Add JavaScript for image modal -->
+<script>
+function showFullImage(src, title) {
+    const modal = new bootstrap.Modal(document.getElementById('imageModal'));
+    document.querySelector('#imageModal .modal-title').textContent = title;
+    document.querySelector('#imageModal .modal-body img').src = src;
+    modal.show();
+}
+</script>
+
+<!-- Add CSS for thumbnails -->
+<style>
+.detection-thumbnail {
+    border: 1px solid #ddd;
+    border-radius: 4px;
+    padding: 2px;
+    transition: transform 0.2s;
+}
+
+.detection-thumbnail:hover {
+    transform: scale(1.05);
+    box-shadow: 0 0 10px rgba(0,0,0,0.2);
+}
+</style>
 {% endblock %}

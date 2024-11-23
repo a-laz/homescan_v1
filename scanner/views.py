@@ -87,110 +87,112 @@ def scan_history(request, room_id):
     }
     return render(request, 'scanner/history.html', context)
 
+def process_image_data(image_data):
+    """Convert base64 image data to numpy array."""
+    try:
+        # Remove data URL prefix if present
+        if 'base64,' in image_data:
+            image_data = image_data.split('base64,')[1]
+        
+        # Decode base64 image
+        image_bytes = base64.b64decode(image_data)
+        
+        # Convert to numpy array
+        nparr = np.frombuffer(image_bytes, np.uint8)
+        
+        # Decode image
+        image = cv2.imdecode(nparr, cv2.IMREAD_COLOR)
+        
+        if image is None:
+            raise ValueError("Failed to decode image")
+            
+        # Convert BGR to RGB
+        image = cv2.cvtColor(image, cv2.COLOR_BGR2RGB)
+        
+        logger.info(f"Processing image: shape={image.shape}, dtype={image.dtype}")
+        return image
+        
+    except Exception as e:
+        logger.error(f"Error processing image data: {str(e)}")
+        raise
+
 @csrf_exempt
 @login_required
 def process_frame(request):
-    """Process uploaded frame from scanner."""
     try:
-        result = {
-            'status': 'success',
-            'detections': []
-        }
-
         data = json.loads(request.body)
         room_id = data.get('room_id')
         image_data = data.get('image')
-        lidar_data = data.get('lidar_points')  # LiDAR point cloud if available
-        tof_data = data.get('tof_data')  # ToF depth data if available
         
         if image_data and room_id:
             room = get_object_or_404(Room, id=room_id)
             
-            try:
-                # Convert base64 image to numpy array
-                image_format, image_str = image_data.split(';base64,')
-                image_bytes = base64.b64decode(image_str)
-                nparr = np.frombuffer(image_bytes, np.uint8)
-                image_np = cv2.imdecode(nparr, cv2.IMREAD_COLOR)
-                image_np = cv2.cvtColor(image_np, cv2.COLOR_BGR2RGB)
-                
-                # Convert sensor data if provided
-                lidar_points = None
-                if lidar_data:
-                    lidar_points = np.array(json.loads(lidar_data))
-                
-                tof_array = None
-                if tof_data:
-                    tof_bytes = base64.b64decode(tof_data.split(',')[1])
-                    tof_array = np.frombuffer(tof_bytes, dtype=np.float32).reshape(-1, 1)
-                
-                # Get detections using available sensor data
-                detections = detector.detect_and_measure(
-                    image_np,
-                    lidar_points=lidar_points,
-                    tof_data=tof_array
-                )
-                logger.info(f"Detections found: {len(detections)}")
-
-            except Exception as e:
-                logger.error(f"Error processing image: {str(e)}")
-                raise ValueError(f"Invalid image data: {str(e)}")
-
+            # Process image and get detections
+            image_np = process_image_data(image_data)
+            detections = detector.detect_and_measure(image_np)
+            
+            logger.info(f"Detections found: {len(detections)}")
+            
             # Save detections to database
             for detection in detections:
-                dims = detection.get('dimensions', {})
-                if dims:
-                    # Calculate volume
-                    volume = (dims.get('length', 0) * 
-                            dims.get('width', 0) * 
-                            dims.get('height', 0)) / 1728
-
-                    # Save to database
-                    FurnitureDetection.objects.create(
-                        room=room,
-                        furniture_type=detection.get('type', '')[:50],
-                        length=round(float(dims.get('length', 0)), 1),
-                        width=round(float(dims.get('width', 0)), 1),
-                        height=round(float(dims.get('height', 0)), 1),
-                        volume=round(float(volume), 2),
-                        confidence=round(float(detection.get('confidence', 0)), 2),
-                        image_data=image_data if len(image_data) < 100000 else None
-                    )
-
-            # Process image for response
-            if image_np.shape[0] > 400 or image_np.shape[1] > 400:
-                ratio = 400 / max(image_np.shape[0], image_np.shape[1])
-                new_size = (int(image_np.shape[1] * ratio), int(image_np.shape[0] * ratio))
-                image_np = cv2.resize(image_np, new_size, interpolation=cv2.INTER_LANCZOS4)
+                try:
+                    bbox = detection.get('bbox', [])
+                    class_id = detection.get('class')
+                    
+                    if len(bbox) == 4:
+                        # Calculate dimensions from bounding box
+                        x1, y1, x2, y2 = [int(coord) for coord in bbox]
+                        
+                        # Get the cropped image of the detection
+                        cropped_image = image_np[y1:y2, x1:x2]
+                        
+                        # Convert cropped image to base64
+                        _, buffer = cv2.imencode('.jpg', cv2.cvtColor(cropped_image, cv2.COLOR_RGB2BGR))
+                        cropped_base64 = base64.b64encode(buffer).decode('utf-8')
+                        
+                        # Calculate real-world dimensions (in inches)
+                        pixel_width = x2 - x1
+                        pixel_height = y2 - y1
+                        
+                        # Convert pixels to inches (approximate)
+                        PIXELS_PER_INCH = 10  # This needs calibration
+                        width_inches = pixel_width / PIXELS_PER_INCH
+                        height_inches = pixel_height / PIXELS_PER_INCH
+                        depth_inches = (width_inches + height_inches) / 2  # Estimate depth
+                        
+                        # Create detection record
+                        FurnitureDetection.objects.create(
+                            room=room,
+                            furniture_type=detector.get_class_name(class_id),
+                            length=width_inches,
+                            width=depth_inches,
+                            height=height_inches,
+                            volume=(width_inches * depth_inches * height_inches) / 1728,  # Convert to cubic feet
+                            confidence=float(detection.get('confidence', 0.0)),
+                            image_data=cropped_base64
+                        )
+                        
+                        logger.info(f"""
+                        Saved detection:
+                        - Type: {detector.get_class_name(class_id)}
+                        - Dimensions: {width_inches:.1f}" × {depth_inches:.1f}" × {height_inches:.1f}"
+                        - Confidence: {detection.get('confidence', 0.0):.2f}
+                        """)
+                
+                except Exception as e:
+                    logger.error(f"Error processing detection: {str(e)}")
+                    continue
             
-            # Convert back to base64 for response
-            _, buffer = cv2.imencode('.jpg', cv2.cvtColor(image_np, cv2.COLOR_RGB2BGR), 
-                                   [cv2.IMWRITE_JPEG_QUALITY, 50])
-            image_data = base64.b64encode(buffer).decode()
+            return JsonResponse({
+                'status': 'success',
+                'detections': detections
+            })
             
-            if len(image_data) > 100000:
-                new_size = (int(image_np.shape[1] * 0.7), int(image_np.shape[0] * 0.7))
-                image_np = cv2.resize(image_np, new_size, interpolation=cv2.INTER_LANCZOS4)
-                _, buffer = cv2.imencode('.jpg', cv2.cvtColor(image_np, cv2.COLOR_RGB2BGR), 
-                                       [cv2.IMWRITE_JPEG_QUALITY, 40])
-                image_data = base64.b64encode(buffer).decode()
-            
-            result['image'] = f'data:image/jpeg;base64,{image_data}'
-
-        response = JsonResponse(result)
-        if len(response.content) > 500000:
-            del result['image']
-            result['status'] = 'partial'
-            result['message'] = 'Image data omitted due to size constraints'
-            response = JsonResponse(result)
-
-        return response
-
     except Exception as e:
         logger.error(f"Error processing frame: {str(e)}")
         return JsonResponse({
             'status': 'error',
-            'message': str(e)
+            'message': f'Invalid image data: {str(e)}'
         }, status=500)
 
 @login_required

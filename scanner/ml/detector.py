@@ -117,34 +117,71 @@ class CameraCalibrator:
         return self.board.generateImage(size)
 
 class EnhancedFurnitureDetector:
+    # COCO dataset class names that are relevant for furniture
+    FURNITURE_CLASSES = {
+        0: "person",
+        56: "chair",
+        57: "couch",
+        58: "potted plant",
+        59: "bed",
+        60: "dining table",
+        61: "toilet",
+        62: "tv",
+        63: "laptop",
+        64: "mouse",
+        65: "remote",
+        66: "keyboard",
+        67: "cell phone",
+        68: "microwave",
+        69: "oven",
+        70: "sink",
+        71: "refrigerator",
+        72: "book",
+        73: "clock",
+        74: "vase",
+        75: "scissors",
+        76: "teddy bear",
+        77: "hair drier",
+        78: "toothbrush"
+    }
+
     def __init__(self):
         try:
             logger.info("Initializing EnhancedFurnitureDetector...")
             
-            # GPU Diagnostics and Setup
-            logger.info(f"CUDA available: {torch.cuda.is_available()}")
-            logger.info(f"CUDA version: {torch.version.cuda}")
-            
-            if torch.cuda.is_available():
-                logger.info(f"CUDA device count: {torch.cuda.device_count()}")
-                logger.info(f"CUDA device name: {torch.cuda.get_device_name(0)}")
-                torch.cuda.set_device(0)  # Use first GPU
-                # Enable CUDA optimizations
-                torch.backends.cudnn.benchmark = True
-                torch.backends.cudnn.enabled = True
-                
-            # Set device explicitly
-            self.device = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
+            # Set device
+            self.device = "cuda" if torch.cuda.is_available() else "cpu"
             logger.info(f"Using device: {self.device}")
             
-            # Initialize Depth-Anything-V2 through transformers
+            # Initialize camera calibrator
+            self.camera_calibrator = CameraCalibrator()
+            
+            # Initialize object detection model
+            logger.info("Loading YOLO model...")
+            self.model = YOLO('yolov8x.pt')
+            # Configure model settings
+            self.model.conf = 0.25  # confidence threshold
+            self.model.iou = 0.45   # NMS IOU threshold
+            self.model.agnostic_nms = True  # class-agnostic NMS
+            self.model.max_det = 300  # maximum detections per image
+            
+            # Initialize SAM model for segmentation
+            logger.info("Loading SAM model...")
+            sam_checkpoint = "sam_vit_l_0b3195.pth"
+            model_type = "vit_l"
+            sam = sam_model_registry[model_type](checkpoint=sam_checkpoint)
+            sam.to(device=self.device)
+            self.sam_predictor = SamPredictor(sam)
+            logger.info("SAM model loaded successfully")
+            
+            # Initialize Depth-Anything pipeline
             if DEPTH_ANYTHING_AVAILABLE:
                 logger.info("Loading Depth-Anything-V2 model...")
                 try:
                     self.depth_pipeline = pipeline(
                         task="depth-estimation",
                         model="depth-anything/Depth-Anything-V2-Small-hf",
-                        device=0 if torch.cuda.is_available() else -1
+                        device=0 if self.device == "cuda" else -1
                     )
                     logger.info("Depth-Anything-V2 model loaded successfully")
                 except Exception as depth_error:
@@ -152,6 +189,14 @@ class EnhancedFurnitureDetector:
                     self.depth_pipeline = None
             else:
                 self.depth_pipeline = None
+                
+            # GPU setup
+            if self.device == "cuda":
+                logger.info(f"CUDA device count: {torch.cuda.device_count()}")
+                logger.info(f"CUDA device name: {torch.cuda.get_device_name(0)}")
+                torch.cuda.set_device(0)
+                torch.backends.cudnn.benchmark = True
+                torch.backends.cudnn.enabled = True
                 
         except Exception as e:
             logger.error(f"Error in initialization: {str(e)}")
@@ -202,55 +247,36 @@ class EnhancedFurnitureDetector:
         relevant_info = [self.knowledge_texts[i] for i in I[0]]
         return " ".join(relevant_info)
 
-    def detect_objects(self, image):
-        """Detect objects using YOLOv8 with GPU acceleration"""
+    def detect_objects(self, frame):
+        """Detect objects in the frame using YOLO."""
         try:
             logger.info(f"Running detection on device: {self.device}")
-            
-            # Ensure image is on GPU if CUDA is available
-            if torch.cuda.is_available():
-                with torch.cuda.amp.autocast():  # Enable automatic mixed precision
-                    results = self.model(
-                        image,
-                        conf=0.3,
-                        iou=0.4,
-                        classes=None,
-                        agnostic=True,
-                        max_det=50,
-                        verbose=False,
-                        device=self.device
-                    )
-            else:
-                results = self.model(
-                    image,
-                    conf=0.3,
-                    iou=0.4,
-                    classes=None,
-                    agnostic=True,
-                    max_det=50,
-                    verbose=False
-                )
-            
-            # Process results
-            if len(results) > 0:
-                # Move results to CPU for numpy conversion
-                boxes = results[0].boxes.xyxy.cpu().numpy()
-                scores = results[0].boxes.conf.cpu().numpy()
-                labels = [results[0].names[int(c)] for c in results[0].boxes.cls.cpu().numpy()]
+            with torch.amp.autocast(device_type='cuda' if self.device == 'cuda' else 'cpu'):
+                # Run inference
+                results = self.model(frame, verbose=False)
                 
-                logger.info(f"Detected {len(boxes)} objects")
-                return boxes, scores, labels
+                # Process results
+                detections = []
+                for r in results:
+                    boxes = r.boxes
+                    for box in boxes:
+                        # Convert tensors to numpy arrays and extract values
+                        bbox = box.xyxy[0].cpu().numpy()  # Get bounding box coordinates
+                        conf = float(box.conf[0].cpu().numpy())  # Get confidence score
+                        cls = int(box.cls[0].cpu().numpy())  # Get class ID
+                        
+                        detections.append({
+                            'bbox': bbox.tolist(),  # Convert numpy array to list
+                            'confidence': conf,
+                            'class': cls
+                        })
                 
-            return [], [], []
+                logger.info(f"Object detection complete: found {len(detections)} objects")
+                return detections
                 
         except Exception as e:
             logger.error(f"Error in detect_objects: {str(e)}")
-            return [], [], []
-
-        finally:
-            # Clear GPU cache after processing
-            if torch.cuda.is_available():
-                torch.cuda.empty_cache()
+            return []
 
     def _calculate_iou(self, box1, box2):
         """Calculate IoU between two boxes"""
@@ -600,67 +626,91 @@ class EnhancedFurnitureDetector:
         
         return points_2d, points_3d
 
-    def detect_and_measure(self, image, lidar_points=None, tof_data=None):
+    def detect_and_measure(self, frame, depth_map=None, lidar_points=None, tof_data=None):
         """
-        Enhanced detection and measurement using all available models and sensors
+        Main detection and measurement pipeline.
+        
         Args:
-            image: RGB numpy array (HxWx3)
-            lidar_points: Optional LiDAR point cloud data
-            tof_data: Optional ToF sensor data
+            frame (np.ndarray): Input image frame
+            depth_map (np.ndarray, optional): Depth map if available
+            lidar_points (np.ndarray, optional): LiDAR point cloud data if available
+            tof_data (np.ndarray, optional): Time-of-Flight sensor data if available
+        
+        Returns:
+            list: List of processed detections with measurements
         """
         try:
-            # Input validation and logging
-            if not isinstance(image, np.ndarray):
-                raise ValueError(f"Expected numpy array, got {type(image)}")
-                
-            logger.info(f"Processing image: shape={image.shape}, dtype={image.dtype}")
+            # Ensure frame is in correct format (H, W, C)
+            if len(frame.shape) != 3:
+                raise ValueError(f"Invalid frame shape: {frame.shape}")
             
-            # 1. Camera Calibration
-            camera_matrix, dist_coeffs, fov = self.camera_calibrator.calibrate_from_image(image)
-            logger.info(f"Camera calibration complete: FOV={fov:.1f}°")
+            height, width = frame.shape[:2]
             
-            # 2. Get depth data from available sensors
-            depth_map = self.get_depth_data(image, lidar_points, tof_data)
+            # Run object detection
+            detections = self.detect_objects(frame)
             
-            # 3. Object Detection
-            boxes, scores, labels = self.detect_objects(image)
-            logger.info(f"Object detection complete: found {len(boxes)} objects")
-            
-            # 4. Get precise boundaries using SAM2
-            refined_boxes, masks, mask_scores = self.get_precise_boundaries(image, boxes)
-            
-            # Process detections
-            detections = []
-            for box, score, label, mask, mask_score in zip(refined_boxes, scores, labels, masks, mask_scores):
+            # Process each detection
+            processed_detections = []
+            for det in detections:
                 try:
-                    # Calculate dimensions using depth information
-                    dims = self._calculate_object_dimensions(
-                        box, 
-                        camera_matrix[0,0],  # focal length 
-                        label.lower(),
-                        depth_map=depth_map,
-                        mask=mask
-                    )
+                    bbox = det['bbox']
+                    confidence = det['confidence']
+                    class_id = det['class']
                     
-                    detections.append({
-                        'type': label,
-                        'confidence': round(float(score * mask_score), 2),  # Combine detection and mask confidence
-                        'dimensions': dims,
-                        'bounding_box': [float(x) for x in box],
-                        'lidar_enhanced': lidar_points is not None,
-                        'tof_enhanced': tof_data is not None
+                    # Determine which depth data to use
+                    if tof_data is not None:
+                        measurements = self._process_tof_measurements(bbox, tof_data)
+                    elif lidar_points is not None:
+                        measurements = self._process_lidar_measurements(bbox, lidar_points)
+                    elif depth_map is not None:
+                        measurements = self._process_depth_measurements(bbox, depth_map)
+                    else:
+                        measurements = {}
+                    
+                    processed_detections.append({
+                        'bbox': bbox,
+                        'confidence': confidence,
+                        'class': class_id,
+                        'measurements': measurements
                     })
                     
                 except Exception as e:
-                    logger.error(f"Error processing detection {label}: {str(e)}")
+                    logger.error(f"Error processing detection: {str(e)}")
                     continue
-                    
-            logger.info(f"Measurement complete: processed {len(detections)} objects")
-            return detections
-
+            
+            logger.info(f"Measurement complete: processed {len(processed_detections)} objects")
+            return processed_detections
+            
         except Exception as e:
             logger.error(f"Error in detect_and_measure: {str(e)}")
-            raise
+            return []
+
+    def _process_lidar_measurements(self, bbox, lidar_points):
+        """Process measurements using LiDAR data."""
+        try:
+            # Add your LiDAR processing logic here
+            return {}
+        except Exception as e:
+            logger.error(f"Error processing LiDAR measurements: {str(e)}")
+            return {}
+
+    def _process_depth_measurements(self, bbox, depth_map):
+        """Process measurements using depth map."""
+        try:
+            # Add your depth map processing logic here
+            return {}
+        except Exception as e:
+            logger.error(f"Error processing depth measurements: {str(e)}")
+            return {}
+
+    def _process_tof_measurements(self, bbox, tof_data):
+        """Process measurements using Time-of-Flight sensor data."""
+        try:
+            # Add your ToF processing logic here
+            return {}
+        except Exception as e:
+            logger.error(f"Error processing ToF measurements: {str(e)}")
+            return {}
 
     def _calculate_object_dimensions(self, box, focal_length, object_type, depth_map=None, mask=None):
         """Calculate real-world dimensions using camera parameters and depth data"""
@@ -1137,6 +1187,10 @@ class EnhancedFurnitureDetector:
                 torch.cuda.empty_cache()
         except Exception as e:
             logger.error(f"Error in cleanup: {str(e)}")
+
+    def get_class_name(self, class_id):
+        """Convert class ID to human-readable name"""
+        return self.FURNITURE_CLASSES.get(class_id, f"unknown-{class_id}")
 
 class ValidationError(Exception):
     pass

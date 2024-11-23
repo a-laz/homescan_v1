@@ -102,6 +102,14 @@ class FurnitureDetection(models.Model):
     class Meta:
         ordering = ['-timestamp']
 
+    def get_image_url(self):
+        """Return the base64 image data with proper prefix"""
+        if self.image_data:
+            if 'base64,' not in self.image_data:
+                return f'data:image/jpeg;base64,{self.image_data}'
+            return self.image_data
+        return None
+
 class ScanSession(models.Model):
     room = models.ForeignKey(Room, on_delete=models.CASCADE)
     timestamp = models.DateTimeField(auto_now_add=True)
