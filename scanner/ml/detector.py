@@ -16,6 +16,7 @@ from segment_anything import sam_model_registry, SamPredictor
 from ultralytics import YOLO
 import os
 from transformers import pipeline
+import cv2.optflow as optflow  # For optical flow analysis
 
 # Set up logging
 logging.basicConfig(level=logging.INFO)
@@ -197,6 +198,14 @@ class EnhancedFurnitureDetector:
                 torch.cuda.set_device(0)
                 torch.backends.cudnn.benchmark = True
                 torch.backends.cudnn.enabled = True
+                
+            # Initialize frame processing parameters
+            self.frame_buffer = []
+            self.keyframe_interval = 5  # Process every 5th frame
+            self.motion_threshold = 0.3  # Motion detection threshold
+            
+            # Initialize optical flow
+            self.flow_calculator = optflow.DualTVL1OpticalFlow_create()
                 
         except Exception as e:
             logger.error(f"Error in initialization: {str(e)}")
@@ -800,178 +809,206 @@ class EnhancedFurnitureDetector:
             return None
 
     def process_video(self, video_path, output_path=None):
-        """Process entire video and track objects"""
+        """Process video with smart frame sampling and motion analysis"""
         try:
-            # Open video file
             cap = cv2.VideoCapture(video_path)
             if not cap.isOpened():
                 raise ValueError("Could not open video file")
             
-            # Get video properties
-            fps = int(cap.get(cv2.CAP_PROP_FPS))
-            frame_width = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
-            frame_height = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
-            total_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
-            
-            logger.info(f"Processing video: {fps}fps, {frame_width}x{frame_height}, {total_frames} frames")
-            
-            # Initialize video writer if output path is provided
-            if output_path:
-                fourcc = cv2.VideoWriter_fourcc(*'mp4v')
-                out = cv2.VideoWriter(output_path, fourcc, fps, (frame_width, frame_height))
-            # Track detections across frames
-            all_detections = []
+            frames = []
+            optical_flows = []
             frame_count = 0
-            
-            # Process in batches for GPU efficiency
-            batch_size = 4 if torch.cuda.is_available() else 1
-            frames_batch = []
-            batch_indices = []
+            prev_frame = None
             
             while cap.isOpened():
                 ret, frame = cap.read()
                 if not ret:
                     break
+                
+                # Convert to grayscale for motion analysis
+                gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
+                
+                # Smart frame sampling based on motion
+                if prev_frame is not None:
+                    # Calculate motion between frames
+                    flow = self.flow_calculator.calc(prev_frame, gray, None)
+                    motion_magnitude = np.mean(np.abs(flow))
                     
+                    # Sample frame if significant motion detected or at keyframe interval
+                    if motion_magnitude > self.motion_threshold or frame_count % self.keyframe_interval == 0:
+                        frames.append(frame)
+                        optical_flows.append(flow)
+                        
+                        logger.info(f"Frame {frame_count}: Motion magnitude = {motion_magnitude:.2f}")
+                
+                prev_frame = gray
                 frame_count += 1
-                if frame_count % 5 != 0:  # Process every 5th frame
-                    continue
-                
-                # Convert BGR to RGB
-                frame_rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
-                frames_batch.append(frame_rgb)
-                batch_indices.append(frame_count)
-                
-                # Process batch
-                if len(frames_batch) == batch_size:
-                    try:
-                        # Process batch on GPU
-                        with torch.cuda.amp.autocast() if torch.cuda.is_available() else nullcontext():
-                            results = self.model(frames_batch, device=self.device)
-                        
-                        # Process results for each frame
-                        for idx, result in enumerate(results):
-                            frame_detections = []
-                            boxes = result.boxes.xyxy.cpu().numpy()
-                            scores = result.boxes.conf.cpu().numpy()
-                            labels = [result.names[int(c)] for c in result.boxes.cls.cpu().numpy()]
-                            
-                            for box, score, label in zip(boxes, scores, labels):
-                                try:
-                                    # Calculate dimensions
-                                    dims = self._calculate_object_dimensions(
-                                        box, 
-                                        self.camera_calibrator.get_default_calibration(frames_batch[idx].shape)[0][0,0],
-                                        label.lower()
-                                    )
-                                    
-                                    detection = {
-                                        'frame': batch_indices[idx],
-                                        'type': label,
-                                        'confidence': round(float(score), 2),
-                                        'dimensions': dims,
-                                        'bounding_box': [float(x) for x in box]
-                                    }
-                                    
-                                    frame_detections.append(detection)
-                                    
-                                    # Draw on frame if output requested
-                                    if output_path:
-                                        self._draw_detection(frames_batch[idx], detection)
-                                    
-                                except Exception as e:
-                                    logger.error(f"Error processing detection: {str(e)}")
-                                    continue
-                            
-                            # Store frame detections
-                            all_detections.extend(frame_detections)
-                            
-                            # Write frame if output requested
-                            if output_path:
-                                out.write(frames_batch[idx])
-                        
-                        frames_batch = []
-                        batch_indices = []
-                        
-                        # Log progress
-                        if frame_count % 50 == 0:
-                            logger.info(f"Processed {frame_count}/{total_frames} frames")
-                            
-                    except Exception as e:
-                        logger.error(f"Error processing batch: {str(e)}")
-                        continue
             
-            # Clean up
             cap.release()
-            if output_path:
-                out.release()
             
-            # Process all detections to remove duplicates across frames
-            final_detections = self._process_video_detections(all_detections)
+            # Process sampled frames
+            detections = self._process_sampled_frames(frames, optical_flows)
             
-            logger.info(f"Video processing complete. Found {len(final_detections)} unique objects")
+            return detections
+            
+        except Exception as e:
+            logger.error(f"Error in video processing: {str(e)}")
+            raise
+
+    def _process_sampled_frames(self, frames, optical_flows):
+        """Process sampled frames with temporal context"""
+        try:
+            all_detections = []
+            
+            for i, (frame, flow) in enumerate(zip(frames, optical_flows)):
+                # Extract motion features
+                motion_features = self._extract_motion_features(flow)
+                
+                # Get base detections
+                frame_detections = self.detect_objects(frame)
+                
+                # Refine detections using motion context
+                refined_detections = self._refine_with_motion(
+                    frame_detections, 
+                    motion_features
+                )
+                
+                all_detections.extend(refined_detections)
+            
+            # Remove duplicate detections across frames
+            final_detections = self._filter_temporal_duplicates(all_detections)
+            
             return final_detections
             
         except Exception as e:
-            logger.error(f"Error processing video: {str(e)}")
-            raise
+            logger.error(f"Error processing sampled frames: {str(e)}")
+            return []
 
-    def _draw_detection(self, frame, detection):
-        """Draw detection box and info on frame"""
-        box = detection['bounding_box']
-        label = detection['type']
-        conf = detection['confidence']
-        dims = detection['dimensions']
-        
-        # Draw box
-        cv2.rectangle(frame, 
-                     (int(box[0]), int(box[1])), 
-                     (int(box[2]), int(box[3])), 
-                     (0, 255, 0), 2)
-        
-        # Draw label
-        text = f"{label} ({conf:.2f})"
-        cv2.putText(frame, text, 
-                   (int(box[0]), int(box[1]-10)), 
-                   cv2.FONT_HERSHEY_SIMPLEX, 0.5, 
-                   (0, 255, 0), 2)
-        
-        # Draw dimensions
-        dim_text = f"{dims['length']}\"x{dims['width']}\"x{dims['height']}\""
-        cv2.putText(frame, dim_text, 
-                   (int(box[0]), int(box[3]+20)), 
-                   cv2.FONT_HERSHEY_SIMPLEX, 0.5, 
-                   (0, 255, 0), 2)
+    def _extract_motion_features(self, flow):
+        """Extract relevant motion features from optical flow"""
+        try:
+            # Calculate flow magnitude and direction
+            magnitude, angle = cv2.cartToPolar(flow[..., 0], flow[..., 1])
+            
+            return {
+                'mean_magnitude': np.mean(magnitude),
+                'max_magnitude': np.max(magnitude),
+                'mean_angle': np.mean(angle),
+                'motion_areas': self._segment_motion_areas(magnitude)
+            }
+            
+        except Exception as e:
+            logger.error(f"Error extracting motion features: {str(e)}")
+            return {}
 
-    def _process_video_detections(self, detections):
-        """Process all detections to remove duplicates across frames"""
-        # Group detections by object type
-        grouped = {}
+    def _segment_motion_areas(self, magnitude):
+        """Segment areas with significant motion"""
+        try:
+            # Threshold motion magnitude
+            motion_mask = magnitude > self.motion_threshold
+            
+            # Find connected components
+            num_labels, labels = cv2.connectedComponents(motion_mask.astype(np.uint8))
+            
+            # Extract properties of motion areas
+            motion_areas = []
+            for label in range(1, num_labels):
+                area_mask = labels == label
+                area = np.sum(area_mask)
+                if area > 100:  # Minimum area threshold
+                    motion_areas.append({
+                        'area': area,
+                        'centroid': np.mean(np.where(area_mask), axis=1)
+                    })
+            
+            return motion_areas
+            
+        except Exception as e:
+            logger.error(f"Error segmenting motion areas: {str(e)}")
+            return []
+
+    def _refine_with_motion(self, detections, motion_features):
+        """Refine detections using motion context"""
+        try:
+            refined_detections = []
+            
+            for det in detections:
+                # Get detection area
+                bbox = det['bbox']
+                det_center = [(bbox[0] + bbox[2])/2, (bbox[1] + bbox[3])/2]
+                
+                # Check if detection corresponds to motion area
+                motion_score = self._calculate_motion_score(
+                    det_center, 
+                    motion_features['motion_areas']
+                )
+                
+                # Adjust confidence based on motion
+                det['confidence'] *= (1 + motion_score) / 2
+                
+                refined_detections.append(det)
+            
+            return refined_detections
+            
+        except Exception as e:
+            logger.error(f"Error refining detections with motion: {str(e)}")
+            return detections
+
+    def _filter_temporal_duplicates(self, detections):
+        """Filter overlapping detections"""
+        selected = []
         for det in detections:
-            if det['type'] not in grouped:
-                grouped[det['type']] = []
-            grouped[det['type']].append(det)
-        
-        # Process each group
-        final_detections = []
-        for obj_type, group in grouped.items():
-            # Sort by confidence
-            group.sort(key=lambda x: x['confidence'], reverse=True)
+            is_duplicate = False
+            for sel in selected:
+                if self._calculate_iou(det['bounding_box'], sel['bounding_box']) > 0.5:
+                    is_duplicate = True
+                    break
+            if not is_duplicate:
+                selected.append(det)
+        return selected
+
+    def _calculate_motion_score(self, detection_center, motion_areas):
+        """Calculate motion score for a detection"""
+        try:
+            # Calculate distance to all motion areas
+            distances = [np.linalg.norm(np.array(detection_center) - np.array(area['centroid'])) for area in motion_areas]
             
-            # Take highest confidence detection that doesn't overlap with previous
-            selected = []
-            for det in group:
-                is_duplicate = False
-                for sel in selected:
-                    if self._calculate_iou(det['bounding_box'], sel['bounding_box']) > 0.5:
-                        is_duplicate = True
-                        break
-                if not is_duplicate:
-                    selected.append(det)
+            # Calculate motion score based on distance to motion areas
+            motion_score = np.mean(np.exp(-np.array(distances) / self.motion_threshold))
             
-            final_detections.extend(selected)
-        
-        return final_detections
+            return motion_score
+            
+        except Exception as e:
+            logger.error(f"Error calculating motion score: {str(e)}")
+            return 0.0
+
+    def _calculate_motion_score(self, detection_center, motion_areas):
+        """Calculate motion score for a detection"""
+        try:
+            # Calculate distance to all motion areas
+            distances = [np.linalg.norm(np.array(detection_center) - np.array(area['centroid'])) for area in motion_areas]
+            
+            # Calculate motion score based on distance to motion areas
+            motion_score = np.mean(np.exp(-np.array(distances) / self.motion_threshold))
+            
+            return motion_score
+            
+        except Exception as e:
+            logger.error(f"Error calculating motion score: {str(e)}")
+            return 0.0
+
+    def _filter_temporal_duplicates(self, detections):
+        """Filter overlapping detections"""
+        selected = []
+        for det in detections:
+            is_duplicate = False
+            for sel in selected:
+                if self._calculate_iou(det['bounding_box'], sel['bounding_box']) > 0.5:
+                    is_duplicate = True
+                    break
+            if not is_duplicate:
+                selected.append(det)
+        return selected
 
     def validate_video(self, video_path):
         """Validate video file before processing"""
