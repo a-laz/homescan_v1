@@ -95,6 +95,9 @@ class FurnitureDetection(models.Model):
     timestamp = models.DateTimeField(auto_now_add=True)
     video_data = models.FileField(upload_to='videos/', null=True, blank=True)
     frame_number = models.IntegerField(null=True, blank=True)
+    track_id = models.IntegerField(null=True, blank=True)
+    track_age = models.IntegerField(default=0)
+    track_hits = models.IntegerField(default=1)
 
     def __str__(self):
         return f"{self.furniture_type} in {self.room.name}"

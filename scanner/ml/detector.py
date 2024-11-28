@@ -17,6 +17,8 @@ from ultralytics import YOLO
 import os
 from transformers import pipeline
 from .tracker import SimpleTracker
+from .depth_estimator import DepthEstimator
+from typing import List, Tuple
 
 # Set up logging
 logging.basicConfig(level=logging.INFO)
@@ -224,6 +226,8 @@ class EnhancedFurnitureDetector:
 
             # Track history for temporal consistency
             self.track_history = {}
+                
+            self.depth_estimator = DepthEstimator()
                 
         except Exception as e:
             logger.error(f"Error in initialization: {str(e)}")
@@ -1207,6 +1211,69 @@ class EnhancedFurnitureDetector:
     def get_class_name(self, class_id):
         """Convert class ID to human-readable name"""
         return self.FURNITURE_CLASSES.get(class_id, f"unknown-{class_id}")
+
+    def get_precise_boundaries_temporal(self, frames: List[np.ndarray], 
+                                          boxes: List[List[float]]) -> Tuple[List, List, List]:
+        """Get precise object boundaries using SAM with temporal consistency"""
+        try:
+            refined_boxes = []
+            masks = []
+            scores = []
+            
+            # Process first frame
+            first_boxes, first_masks, first_scores = self.get_precise_boundaries(frames[0], boxes)
+            
+            if len(frames) > 1:
+                # Initialize optical flow
+                prev_frame = cv2.cvtColor(frames[0], cv2.COLOR_RGB2GRAY)
+                prev_masks = first_masks
+                
+                for frame in frames[1:]:
+                    curr_frame = cv2.cvtColor(frame, cv2.COLOR_RGB2GRAY)
+                    
+                    # Calculate optical flow
+                    flow = cv2.calcOpticalFlowFarneback(
+                        prev_frame, curr_frame, None,
+                        pyr_scale=0.5, levels=3, winsize=15,
+                        iterations=3, poly_n=5, poly_sigma=1.2,
+                        flags=0
+                    )
+                    
+                    # Warp previous masks using flow
+                    warped_masks = []
+                    for mask in prev_masks:
+                        h, w = mask.shape
+                        flow_map = np.column_stack((
+                            flow[..., 0].flatten(),
+                            flow[..., 1].flatten()
+                        ))
+                        warped_points = np.mgrid[0:h, 0:w].reshape(2, -1).T + flow_map
+                        warped_mask = cv2.remap(
+                            mask.astype(np.float32),
+                            warped_points[..., 0],
+                            warped_points[..., 1],
+                            cv2.INTER_LINEAR
+                        )
+                        warped_masks.append(warped_mask > 0.5)
+                    
+                    # Use warped masks to guide new segmentation
+                    curr_boxes, curr_masks, curr_scores = self.get_precise_boundaries(
+                        frame, boxes, prior_masks=warped_masks
+                    )
+                    
+                    # Update for next frame
+                    prev_frame = curr_frame
+                    prev_masks = curr_masks
+                    
+                    refined_boxes.extend(curr_boxes)
+                    masks.extend(curr_masks)
+                    scores.extend(curr_scores)
+            
+            return refined_boxes, masks, scores
+            
+        except Exception as e:
+            logger.error(f"Error in temporal segmentation: {str(e)}")
+            return self.get_precise_boundaries(frames[0], boxes)
 
 class ValidationError(Exception):
     pass

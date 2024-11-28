@@ -127,7 +127,7 @@ def process_frame(request):
         if image_data and room_id:
             room = get_object_or_404(Room, id=room_id)
             
-            # Process image and get detections
+            # Process image and get detections with tracking info
             image_np = process_image_data(image_data)
             detections = detector.detect_and_measure(image_np)
             
@@ -138,6 +138,7 @@ def process_frame(request):
                 try:
                     bbox = detection.get('bbox', [])
                     class_id = detection.get('class')
+                    track_id = detection.get('track_id', None)  # New field from tracker
                     
                     if len(bbox) == 4:
                         # Calculate dimensions from bounding box
@@ -161,7 +162,7 @@ def process_frame(request):
                         depth_inches = (width_inches + height_inches) / 2  # Estimate depth
                         
                         # Create detection record
-                        FurnitureDetection.objects.create(
+                        detection_obj = FurnitureDetection.objects.create(
                             room=room,
                             furniture_type=detector.get_class_name(class_id),
                             length=width_inches,
@@ -169,12 +170,14 @@ def process_frame(request):
                             height=height_inches,
                             volume=(width_inches * depth_inches * height_inches) / 1728,  # Convert to cubic feet
                             confidence=float(detection.get('confidence', 0.0)),
-                            image_data=cropped_base64
+                            image_data=cropped_base64,
+                            track_id=track_id  # Store the track ID if you want to reference it later
                         )
                         
                         logger.info(f"""
                         Saved detection:
                         - Type: {detector.get_class_name(class_id)}
+                        - Track ID: {track_id}
                         - Dimensions: {width_inches:.1f}" × {depth_inches:.1f}" × {height_inches:.1f}"
                         - Confidence: {detection.get('confidence', 0.0):.2f}
                         """)
