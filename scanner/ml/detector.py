@@ -16,7 +16,6 @@ from segment_anything import sam_model_registry, SamPredictor
 from ultralytics import YOLO
 import os
 from transformers import pipeline
-import cv2.optflow as optflow  # For optical flow analysis
 
 # Set up logging
 logging.basicConfig(level=logging.INFO)
@@ -204,8 +203,16 @@ class EnhancedFurnitureDetector:
             self.keyframe_interval = 5  # Process every 5th frame
             self.motion_threshold = 0.3  # Motion detection threshold
             
-            # Initialize optical flow
-            self.flow_calculator = optflow.DualTVL1OpticalFlow_create()
+            # Initialize optical flow with Farneback algorithm instead of TVL1
+            self.flow_params = dict(
+                pyr_scale=0.5,
+                levels=3,
+                winsize=15,
+                iterations=3,
+                poly_n=5,
+                poly_sigma=1.2,
+                flags=0
+            )
                 
         except Exception as e:
             logger.error(f"Error in initialization: {str(e)}")
@@ -830,8 +837,13 @@ class EnhancedFurnitureDetector:
                 
                 # Smart frame sampling based on motion
                 if prev_frame is not None:
-                    # Calculate motion between frames
-                    flow = self.flow_calculator.calc(prev_frame, gray, None)
+                    # Calculate motion between frames using Farneback algorithm
+                    flow = cv2.calcOpticalFlowFarneback(
+                        prev_frame, 
+                        gray, 
+                        None,
+                        **self.flow_params
+                    )
                     motion_magnitude = np.mean(np.abs(flow))
                     
                     # Sample frame if significant motion detected or at keyframe interval
