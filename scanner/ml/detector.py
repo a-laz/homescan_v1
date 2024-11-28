@@ -16,6 +16,7 @@ from segment_anything import sam_model_registry, SamPredictor
 from ultralytics import YOLO
 import os
 from transformers import pipeline
+from .tracker import SimpleTracker
 
 # Set up logging
 logging.basicConfig(level=logging.INFO)
@@ -213,6 +214,16 @@ class EnhancedFurnitureDetector:
                 poly_sigma=1.2,
                 flags=0
             )
+                
+            # Initialize ByteTracker
+            self.tracker = SimpleTracker(
+                max_age=30,
+                min_hits=3,
+                iou_threshold=0.3
+            )
+
+            # Track history for temporal consistency
+            self.track_history = {}
                 
         except Exception as e:
             logger.error(f"Error in initialization: {str(e)}")
@@ -816,7 +827,7 @@ class EnhancedFurnitureDetector:
             return None
 
     def process_video(self, video_path, output_path=None):
-        """Process video with smart frame sampling and motion analysis"""
+        """Process video with object detection and tracking."""
         try:
             cap = cv2.VideoCapture(video_path)
             if not cap.isOpened():
@@ -858,169 +869,125 @@ class EnhancedFurnitureDetector:
             
             cap.release()
             
-            # Process sampled frames
-            detections = self._process_sampled_frames(frames, optical_flows)
+            all_tracks = []
+            track_ids = {}
             
-            return detections
+            for frame_idx, frame in enumerate(frames):
+                # Get detections for current frame
+                detections = self.detect_objects(frame)
+                
+                # Convert detections to tracker format
+                tracker_input = []
+                for det in detections:
+                    bbox = det['bbox']
+                    tracker_input.append([
+                        bbox[0], bbox[1], bbox[2], bbox[3],
+                        det['confidence'],
+                        det['class']
+                    ])
+                tracker_input = np.array(tracker_input)
+                
+                # Update tracker
+                if len(tracker_input) > 0:
+                    tracks = self.tracker.update(
+                        tracker_input,
+                        [frame.shape[0], frame.shape[1]],
+                        [frame.shape[0], frame.shape[1]]
+                    )
+                    
+                    # Process tracks
+                    for track in tracks:
+                        track_id = int(track.track_id)
+                        bbox = track.tlbr
+                        class_id = int(track.cls)
+                        
+                        # Store track history
+                        if track_id not in self.track_history:
+                            self.track_history[track_id] = []
+                        
+                        self.track_history[track_id].append({
+                            'frame_idx': frame_idx,
+                            'bbox': bbox,
+                            'class': class_id
+                        })
+                        
+                        # Add to results
+                        all_tracks.append({
+                            'track_id': track_id,
+                            'frame_idx': frame_idx,
+                            'bbox': bbox.tolist(),
+                            'class': class_id,
+                            'confidence': float(track.score)
+                        })
+            
+            # Post-process tracks for temporal consistency
+            final_tracks = self._post_process_tracks(all_tracks)
+            
+            return final_tracks
             
         except Exception as e:
             logger.error(f"Error in video processing: {str(e)}")
             raise
 
-    def _process_sampled_frames(self, frames, optical_flows):
-        """Process sampled frames with temporal context"""
+    def _post_process_tracks(self, tracks):
+        """Post-process tracks for temporal consistency."""
         try:
-            all_detections = []
+            processed_tracks = {}
             
-            for i, (frame, flow) in enumerate(zip(frames, optical_flows)):
-                # Extract motion features
-                motion_features = self._extract_motion_features(flow)
-                
-                # Get base detections
-                frame_detections = self.detect_objects(frame)
-                
-                # Refine detections using motion context
-                refined_detections = self._refine_with_motion(
-                    frame_detections, 
-                    motion_features
-                )
-                
-                all_detections.extend(refined_detections)
+            # Group by track_id
+            for track in tracks:
+                track_id = track['track_id']
+                if track_id not in processed_tracks:
+                    processed_tracks[track_id] = []
+                processed_tracks[track_id].append(track)
             
-            # Remove duplicate detections across frames
-            final_detections = self._filter_temporal_duplicates(all_detections)
+            # Process each track
+            final_tracks = []
+            for track_id, track_frames in processed_tracks.items():
+                # Sort by frame index
+                track_frames.sort(key=lambda x: x['frame_idx'])
+                
+                # Filter short tracks
+                if len(track_frames) < 3:  # Minimum track length
+                    continue
+                
+                # Smooth trajectories
+                smoothed_track = self._smooth_trajectory(track_frames)
+                
+                # Add to final results
+                final_tracks.extend(smoothed_track)
             
-            return final_detections
+            return final_tracks
             
         except Exception as e:
-            logger.error(f"Error processing sampled frames: {str(e)}")
-            return []
+            logger.error(f"Error in track post-processing: {str(e)}")
+            return tracks
 
-    def _extract_motion_features(self, flow):
-        """Extract relevant motion features from optical flow"""
+    def _smooth_trajectory(self, track_frames):
+        """Smooth object trajectory using moving average."""
         try:
-            # Calculate flow magnitude and direction
-            magnitude, angle = cv2.cartToPolar(flow[..., 0], flow[..., 1])
+            window_size = 3
+            smoothed = []
             
-            return {
-                'mean_magnitude': np.mean(magnitude),
-                'max_magnitude': np.max(magnitude),
-                'mean_angle': np.mean(angle),
-                'motion_areas': self._segment_motion_areas(magnitude)
-            }
-            
-        except Exception as e:
-            logger.error(f"Error extracting motion features: {str(e)}")
-            return {}
-
-    def _segment_motion_areas(self, magnitude):
-        """Segment areas with significant motion"""
-        try:
-            # Threshold motion magnitude
-            motion_mask = magnitude > self.motion_threshold
-            
-            # Find connected components
-            num_labels, labels = cv2.connectedComponents(motion_mask.astype(np.uint8))
-            
-            # Extract properties of motion areas
-            motion_areas = []
-            for label in range(1, num_labels):
-                area_mask = labels == label
-                area = np.sum(area_mask)
-                if area > 100:  # Minimum area threshold
-                    motion_areas.append({
-                        'area': area,
-                        'centroid': np.mean(np.where(area_mask), axis=1)
-                    })
-            
-            return motion_areas
-            
-        except Exception as e:
-            logger.error(f"Error segmenting motion areas: {str(e)}")
-            return []
-
-    def _refine_with_motion(self, detections, motion_features):
-        """Refine detections using motion context"""
-        try:
-            refined_detections = []
-            
-            for det in detections:
-                # Get detection area
-                bbox = det['bbox']
-                det_center = [(bbox[0] + bbox[2])/2, (bbox[1] + bbox[3])/2]
+            for i in range(len(track_frames)):
+                # Get window indices
+                start_idx = max(0, i - window_size // 2)
+                end_idx = min(len(track_frames), i + window_size // 2 + 1)
+                window = track_frames[start_idx:end_idx]
                 
-                # Check if detection corresponds to motion area
-                motion_score = self._calculate_motion_score(
-                    det_center, 
-                    motion_features['motion_areas']
-                )
+                # Calculate average bbox
+                avg_bbox = np.mean([frame['bbox'] for frame in window], axis=0)
                 
-                # Adjust confidence based on motion
-                det['confidence'] *= (1 + motion_score) / 2
-                
-                refined_detections.append(det)
+                # Create smoothed frame
+                smoothed_frame = track_frames[i].copy()
+                smoothed_frame['bbox'] = avg_bbox.tolist()
+                smoothed.append(smoothed_frame)
             
-            return refined_detections
-            
-        except Exception as e:
-            logger.error(f"Error refining detections with motion: {str(e)}")
-            return detections
-
-    def _filter_temporal_duplicates(self, detections):
-        """Filter overlapping detections"""
-        selected = []
-        for det in detections:
-            is_duplicate = False
-            for sel in selected:
-                if self._calculate_iou(det['bounding_box'], sel['bounding_box']) > 0.5:
-                    is_duplicate = True
-                    break
-            if not is_duplicate:
-                selected.append(det)
-        return selected
-
-    def _calculate_motion_score(self, detection_center, motion_areas):
-        """Calculate motion score for a detection"""
-        try:
-            # Calculate distance to all motion areas
-            distances = [np.linalg.norm(np.array(detection_center) - np.array(area['centroid'])) for area in motion_areas]
-            
-            # Calculate motion score based on distance to motion areas
-            motion_score = np.mean(np.exp(-np.array(distances) / self.motion_threshold))
-            
-            return motion_score
+            return smoothed
             
         except Exception as e:
-            logger.error(f"Error calculating motion score: {str(e)}")
-            return 0.0
-
-    def _calculate_motion_score(self, detection_center, motion_areas):
-        """Calculate motion score for a detection"""
-        try:
-            # Calculate distance to all motion areas
-            distances = [np.linalg.norm(np.array(detection_center) - np.array(area['centroid'])) for area in motion_areas]
-            
-            # Calculate motion score based on distance to motion areas
-            motion_score = np.mean(np.exp(-np.array(distances) / self.motion_threshold))
-            
-            return motion_score
-            
-        except Exception as e:
-            logger.error(f"Error calculating motion score: {str(e)}")
-            return 0.0
-
-    def _filter_temporal_duplicates(self, detections):
-        """Filter overlapping detections"""
-        selected = []
-        for det in detections:
-            is_duplicate = False
-            for sel in selected:
-                if self._calculate_iou(det['bounding_box'], sel['bounding_box']) > 0.5:
-                    is_duplicate = True
-                    break
-            if not is_duplicate:
-                selected.append(det)
-        return selected
+            logger.error(f"Error in trajectory smoothing: {str(e)}")
+            return track_frames
 
     def validate_video(self, video_path):
         """Validate video file before processing"""
